@@ -1,0 +1,87 @@
+{% extends "base.html" %}
+{% block title %}LoRa Metrics{% endblock %}
+{% block content %}
+<h3 class="mb-4">LoRa Communication Metrics</h3>
+
+<div class="row g-3 mb-4">
+  <div class="col-md-6">
+    <div class="card">
+      <div class="card-header">RSSI vs Distance</div>
+      <div class="card-body"><canvas id="rssiChart" height="180"></canvas></div>
+    </div>
+  </div>
+  <div class="col-md-6">
+    <div class="card">
+      <div class="card-header">PDR vs Distance</div>
+      <div class="card-body"><canvas id="pdrChart" height="180"></canvas></div>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-header">All Readings</div>
+  <div class="card-body p-0">
+    <table class="table table-sm mb-0">
+      <thead>
+        <tr>
+          <th>Test</th><th>Dist</th><th>RSSI</th><th>SNR</th>
+          <th>Sent</th><th>Recv</th><th>PDR</th>
+          <th>Latency</th><th>Env</th><th>Time</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for r in rows %}
+        <tr>
+          <td><b>{{ r.test_id }}</b></td>
+          <td>{{ r.distance_m }} m</td>
+          <td>{{ r.rssi_dbm }}</td>
+          <td>{{ r.snr_db }}</td>
+          <td>{{ r.packets_sent }}</td>
+          <td>{{ r.packets_received }}</td>
+          <td>{{ r.pdr_percent }}%</td>
+          <td>{{ r.latency_ms }} ms</td>
+          <td>{{ r.test_environment }}</td>
+          <td>{{ r.timestamp }}</td>
+        </tr>
+      {% else %}
+        <tr><td colspan="10" class="text-center text-muted py-3">
+          No data yet. Add via <code>add_test_data.py lora ...</code>
+        </td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script id="loraChartData" type="application/json">{{ rows | tojson }}</script>
+<script>
+
+const chartRows = JSON.parse(document.getElementById('loraChartData').textContent);
+
+if (chartRows.length) {
+  const labels = chartRows.map(r => r.distance_m + 'm');
+  new Chart(document.getElementById('rssiChart'), {
+    type: 'line',
+    data: { labels, datasets: [{
+      label: 'RSSI (dBm)',
+      data: chartRows.map(r => r.rssi_dbm),
+      borderColor: '#1a5f2a',
+      backgroundColor: 'rgba(26,95,42,0.1)',
+      tension: 0.3, fill: true
+    }]}
+  });
+  new Chart(document.getElementById('pdrChart'), {
+    type: 'line',
+    data: { labels, datasets: [{
+      label: 'PDR (%)',
+      data: chartRows.map(r => r.pdr_percent),
+      borderColor: '#0d6efd',
+      backgroundColor: 'rgba(13,110,253,0.1)',
+      tension: 0.3, fill: true
+    }]}
+  });
+}
+</script>
+{% endblock %}

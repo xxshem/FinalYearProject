@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}Events{% endblock %}
+{% block content %}
+<h3 class="mb-4">System Events</h3>
+<div class="card">
+  <div class="card-body p-0">
+    <table class="table table-sm mb-0">
+      <thead>
+        <tr><th>ID</th><th>Time</th><th>Type</th><th>Source</th><th>Description</th></tr>
+      </thead>
+      <tbody>
+      {% for r in rows %}
+        <tr>
+          <td>{{ r.event_id }}</td>
+          <td>{{ r.timestamp }}</td>
+          <td><b>{{ r.event_type }}</b></td>
+          <td>{{ r.source }}</td>
+          <td>{{ r.description }}</td>
+        </tr>
+      {% else %}
+        <tr><td colspan="5" class="text-center text-muted py-3">
+          No events yet.
+        </td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

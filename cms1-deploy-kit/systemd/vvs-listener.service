@@ -1,0 +1,18 @@
+[Unit]
+Description=VVS Gate Listener (LoRa CH1, CMS1)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+ExecStartPre=/bin/sleep 5
+WorkingDirectory=/home/pi/vvs/lora
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 /home/pi/vvs/lora/gate_listener.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

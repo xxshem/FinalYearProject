@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}Logs{% endblock %}
+{% block content %}
+<h3 class="mb-4">Verification Logs</h3>
+<div class="card">
+  <div class="card-body p-0">
+    <table class="table table-sm mb-0">
+      <thead>
+        <tr>
+          <th>Log ID</th><th>Time</th><th>Vehicle</th><th>Owner</th>
+          <th>Gate</th><th>Result</th><th>Reason</th><th>Synced</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for r in rows %}
+        <tr>
+          <td>{{ r.log_id }}</td>
+          <td>{{ r.scan_time }}</td>
+          <td>{{ r.registration_no or '—' }}</td>
+          <td>{{ r.owner_name or '—' }}</td>
+          <td>{{ r.gate_id }}</td>
+          <td>
+            <span class="badge badge-{{ r.verification_result }}">
+              {{ r.verification_result }}
+            </span>
+          </td>
+          <td>{{ r.denial_reason or '' }}</td>
+          <td>{{ '✓' if r.synced else '—' }}</td>
+        </tr>
+      {% else %}
+        <tr><td colspan="8" class="text-center text-muted py-3">
+          No logs yet. Gate scans will appear here.
+        </td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

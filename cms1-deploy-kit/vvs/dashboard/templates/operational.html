@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title %}Operational Metrics{% endblock %}
+{% block content %}
+<h3 class="mb-4">Operational Metrics</h3>
+<div class="card">
+  <div class="card-body p-0">
+    <table class="table table-sm mb-0">
+      <thead>
+        <tr>
+          <th>Test</th><th>Response (ms)</th><th>Cache</th>
+          <th>Throughput (vpm)</th><th>DB (ms)</th>
+          <th>Offline</th><th>Queue</th><th>Time</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for r in rows %}
+        <tr>
+          <td><b>{{ r.test_id }}</b></td>
+          <td>{{ r.response_time_ms }}</td>
+          <td>{{ '✓ hit' if r.cache_hit else '✗ miss' }}</td>
+          <td>{{ r.throughput_vpm }}</td>
+          <td>{{ r.db_query_ms }}</td>
+          <td>{{ 'yes' if r.offline_mode else 'no' }}</td>
+          <td>{{ r.queue_size }}</td>
+          <td>{{ r.timestamp }}</td>
+        </tr>
+      {% else %}
+        <tr><td colspan="8" class="text-center text-muted py-3">
+          No data yet. Add via <code>add_test_data.py op ...</code>
+        </td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

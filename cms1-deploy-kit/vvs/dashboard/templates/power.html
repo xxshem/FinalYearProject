@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}Power{% endblock %}
+{% block content %}
+<h3 class="mb-4">Power Consumption</h3>
+<div class="card">
+  <div class="card-body p-0">
+    <table class="table table-sm mb-0">
+      <thead>
+        <tr>
+          <th>Test</th><th>State</th><th>Voltage (V)</th>
+          <th>Current (mA)</th><th>Power (mW)</th><th>Time</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for r in rows %}
+        <tr>
+          <td><b>{{ r.test_id }}</b></td>
+          <td>{{ r.state }}</td>
+          <td>{{ r.voltage_v }}</td>
+          <td>{{ r.current_ma }}</td>
+          <td>{{ r.power_mw }}</td>
+          <td>{{ r.timestamp }}</td>
+        </tr>
+      {% else %}
+        <tr><td colspan="6" class="text-center text-muted py-3">
+          No data yet. Add via <code>add_test_data.py power ...</code>
+        </td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

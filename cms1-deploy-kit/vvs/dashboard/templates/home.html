@@ -1,0 +1,87 @@
+{% extends "base.html" %}
+{% block title %}Home{% endblock %}
+{% block content %}
+<h3 class="mb-4">Overview</h3>
+
+<div class="row g-3 mb-4">
+  <div class="col-md-3">
+    <div class="card stat-card"><div class="card-body">
+      <small class="text-muted">Registered Vehicles</small>
+      <div class="stat-num">{{ stats.vehicles }}</div>
+    </div></div>
+  </div>
+  <div class="col-md-3">
+    <div class="card stat-card"><div class="card-body">
+      <small class="text-muted">Gates Online</small>
+      <div class="stat-num">{{ stats.gates_online }}/{{ stats.gates_total }}</div>
+    </div></div>
+  </div>
+  <div class="col-md-3">
+    <div class="card stat-card"><div class="card-body">
+      <small class="text-muted">Logs Today</small>
+      <div class="stat-num">{{ stats.logs_today }}</div>
+    </div></div>
+  </div>
+  <div class="col-md-3">
+    <div class="card stat-card"><div class="card-body">
+      <small class="text-muted">LoRa Tests</small>
+      <div class="stat-num">{{ stats.lora_tests }}</div>
+    </div></div>
+  </div>
+</div>
+
+<div class="row g-3">
+  <div class="col-md-5">
+    <div class="card">
+      <div class="card-header">Gate Nodes</div>
+      <div class="card-body p-0">
+        <table class="table mb-0">
+          <thead><tr><th>Gate</th><th>Location</th><th>Status</th></tr></thead>
+          <tbody>
+          {% for g in gates %}
+            <tr>
+              <td><b>{{ g.gate_id }}</b></td>
+              <td>{{ g.location }}</td>
+              <td>
+                <span class="badge {% if g.status=='online' %}bg-success{% else %}bg-secondary{% endif %}">
+                  {{ g.status }}
+                </span>
+              </td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-md-7">
+    <div class="card">
+      <div class="card-header">Recent Activity</div>
+      <div class="card-body p-0">
+        <table class="table mb-0">
+          <thead><tr><th>Time</th><th>Vehicle</th><th>Gate</th><th>Result</th></tr></thead>
+          <tbody>
+          {% for r in recent %}
+            <tr>
+              <td>{{ r.scan_time }}</td>
+              <td>{{ r.registration_no or '—' }}</td>
+              <td>{{ r.gate_id }}</td>
+              <td>
+                <span class="badge badge-{{ r.verification_result }}">
+                  {{ r.verification_result }}
+                </span>
+              </td>
+            </tr>
+          {% else %}
+            <tr><td colspan="4" class="text-center text-muted py-3">
+              No activity yet. Add data via <code>add_test_data.py</code>
+            </td></tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
