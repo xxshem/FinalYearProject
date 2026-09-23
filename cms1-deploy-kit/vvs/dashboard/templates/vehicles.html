@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block title %}Vehicles{% endblock %}
+{% block content %}
+<div class="d-flex justify-content-between mb-3">
+  <h3>Registered Vehicles</h3>
+  <a href="/vehicles/new" class="btn btn-success">+ Register Vehicle</a>
+</div>
+
+<div class="card">
+  <div class="card-body p-0">
+    <table class="table table-sm table-hover mb-0">
+      <thead class="table-light">
+        <tr>
+          <th>ID</th><th>Reg No</th><th>Owner</th><th>Type</th>
+          <th>Valid From</th><th>Valid To</th><th>Status</th><th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for v in vehicles %}
+        <tr>
+          <td>{{ v.vehicle_id }}</td>
+          <td><b>{{ v.registration_no }}</b></td>
+          <td>{{ v.owner_name }}</td>
+          <td>{{ v.vehicle_type }}</td>
+          <td>{{ v.valid_from }}</td>
+          <td>{{ v.valid_to }}</td>
+          <td>
+            <span class="badge {% if v.is_active %}bg-success{% else %}bg-danger{% endif %}">
+              {{ 'active' if v.is_active else 'revoked' }}
+            </span>
+          </td>
+          <td>
+            <a href="/vehicles/{{ v.vehicle_id }}/qr"
+               class="btn btn-sm btn-outline-primary" target="_blank">QR</a>
+            {% if v.is_active %}
+              <form method="post" action="/vehicles/{{ v.vehicle_id }}/revoke"
+                    style="display:inline">
+                <button class="btn btn-sm btn-outline-danger">Revoke</button>
+              </form>
+            {% else %}
+              <form method="post" action="/vehicles/{{ v.vehicle_id }}/activate"
+                    style="display:inline">
+                <button class="btn btn-sm btn-outline-success">Activate</button>
+              </form>
+            {% endif %}
+          </td>
+        </tr>
+      {% else %}
+        <tr><td colspan="8" class="text-center text-muted py-3">
+          No vehicles. <a href="/vehicles/new">Register one</a>.
+        </td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

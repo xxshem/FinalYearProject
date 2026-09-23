@@ -24,10 +24,17 @@
     <a class="navbar-brand" href="/">🎓 DKUT VVS Dashboard</a>
     <ul class="navbar-nav ms-auto flex-row gap-3">
       <li><a class="nav-link" href="/">Home</a></li>
+      <li><a class="nav-link" href="/vehicles">Vehicles</a></li>
       <li><a class="nav-link" href="/lora">LoRa</a></li>
       <li><a class="nav-link" href="/operational">Ops</a></li>
       <li><a class="nav-link" href="/power">Power</a></li>
       <li><a class="nav-link" href="/logs">Logs</a></li>
+      <li><a class="nav-link" href="/events">
+  Events
+  {% if clone_alert_24h %}
+    <span class="badge bg-danger">{{ clone_alert_24h }}</span>
+  {% endif %}
+</a></li>
       <li><a class="nav-link" href="/events">Events</a></li>
       <li><a class="nav-link" href="/data">Raw Data</a></li>
     </ul>
@@ -41,5 +48,17 @@
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 {% block scripts %}{% endblock %}
+<script>
+// Gap 2.5 — live stat updates on any page with [data-stat]
+setInterval(() => {
+  fetch('/api/stats').then(r => r.json()).then(d => {
+    document.querySelectorAll('[data-stat]').forEach(el => {
+      const k = el.dataset.stat;
+      if (d[k] !== undefined) el.textContent = d[k];
+    });
+  }).catch(() => {});
+}, 5000);
+</script>
+
 </body>
 </html>

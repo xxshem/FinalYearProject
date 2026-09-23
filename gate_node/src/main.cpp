@@ -23,7 +23,7 @@
 #include "qr_decoder.h"
 
 // ── Configuration ─────────────────────────────────────
-#define GATE_ID   "GATE_A"
+String GATE_ID = "GATE_A";        // runtime-changeable default
 #define DEVICE_ID 0x01
 
 // LoRa pins (ESP32-CAM)
@@ -51,13 +51,36 @@ uint16_t seq = 0;
 
 // ── Forward declarations ─────────────────────────────
 void initLoRa();
-void sendVerifyRequest(const String& token);
+void sendVerifyRequest(const String& token, const String& fullPayload);
 String waitForReply(unsigned long timeoutMs);
 void indicate(bool granted, const String& reg);
 void pcf_write(uint8_t v);
 void pcf_all_off();
 void lcd_show(const char* line1, const char* line2);
 void beep(uint16_t duration_ms);
+bool handleSerialCommand(const String& line) {
+    if (line.startsWith("SET_GATE=")) {
+        String newId = line.substring(9);
+        newId.trim();
+        if (newId.length() > 0) {
+            GATE_ID = newId;
+            Serial.printf("[GATE] GATE_ID now = %s\n", GATE_ID.c_str());
+            lcd_show("Gate ID set", GATE_ID.c_str());
+            delay(1500);
+            lcd_show("Ready", "Scan QR code");
+            return true;
+        }
+    }
+    if (line == "WHOAMI") {
+        Serial.printf("[GATE] current GATE_ID = %s\n", GATE_ID.c_str());
+        lcd_show("Gate ID", GATE_ID.c_str());
+        delay(1500);
+        lcd_show("Ready", "Scan QR code");
+        return true;
+    }
+    return false; 
+}
+
 // ─────────────────────────────────────────────────────
 
 // ─────────────────────────────────────────────────────
@@ -94,29 +117,39 @@ void setup() {
 }
 
 void loop() {
+
     String payload = "";
 
-    // Prefer serial input (bench-test override), else scan QR
     if (Serial.available()) {
-        payload = Serial.readStringUntil('\n');
-        payload.trim();
+        String line = Serial.readStringUntil('\n');
+        line.trim();
+
+        // Runtime commands (SET_GATE=..., WHOAMI) — not tokens
+        if (handleSerialCommand(line)) {
+            return;
+        }
+
+        // Otherwise treat the line as a manual token for bench testing
+        payload = line;
     } else {
         payload = qr_scan_once();
     }
 
     if (payload.length() == 0) { delay(50); return; }
 
+    
+
     // Payload format: vid|token|signature → extract token
     int p1 = payload.indexOf('|');
     int p2 = payload.indexOf('|', p1 + 1);
-    String token = (p1 > 0 && p2 > p1)
-                 ? payload.substring(p1 + 1, p2)
-                 : payload;
+    String token = (p1 > 0 && p2 > p1) ? payload.substring(p1 + 1, p2) : payload;
+    sendVerifyRequest(token, payload);   // pass both
+    
 
     Serial.printf("[GATE] token: %s\n", token.c_str());
     lcd_show("Checking...", token.c_str());
 
-    sendVerifyRequest(token);
+
 
     String reply = waitForReply(2000);
     if (reply.length() == 0) {
@@ -147,19 +180,24 @@ void initLoRa() {
     Serial.println("[LORA] ready on 868.1 MHz");
 }
 
-void sendVerifyRequest(const String& token) {
+void sendVerifyRequest(const String& token, const String& fullPayload) {
     JSONVar o;
-    o["type"]  = "VERIFY_REQ";
-    o["gate"]  = GATE_ID;
-    o["token"] = token;
-    o["seq"]   = seq++;
-    String payload = JSON.stringify(o);
+    o["type"]    = "VERIFY_REQ";
+    o["gate"]    = GATE_ID;
+    o["token"]   = token;         // legacy fallback
+    o["payload"] = fullPayload;   // full vid|token|signature
+    o["seq"]     = seq++;
+    String body = JSON.stringify(o);
 
     LoRa.beginPacket();
-    LoRa.print(payload);
+    LoRa.print(body);
     LoRa.endPacket();
-    Serial.printf("[LORA] tx %u bytes\n", payload.length());
+    Serial.printf("[LORA] tx %u bytes\n", body.length());
 }
+
+
+
+
 
 String waitForReply(unsigned long timeoutMs) {
     unsigned long t0 = millis();

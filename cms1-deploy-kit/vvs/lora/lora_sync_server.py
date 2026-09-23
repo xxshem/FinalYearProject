@@ -7,6 +7,7 @@ sys.path.insert(0, VVS_DIR)
 from scripts.config import DB_PATH
 from scripts.offline_queue import pending, mark_sent, mark_failed
 
+
 SERIAL_PORT = "/dev/ttyUSB0"
 BAUD = 115200
 CHUNK = 180

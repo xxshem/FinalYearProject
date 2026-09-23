@@ -33,4 +33,10 @@
     </table>
   </div>
 </div>
+<div class="mt-3">
+  <b>Export CSV:</b>
+  {% for t in tables %}
+    <a href="/export/{{ t }}" class="btn btn-sm btn-outline-secondary">{{ t }}</a>
+  {% endfor %}
+</div>
 {% endblock %}

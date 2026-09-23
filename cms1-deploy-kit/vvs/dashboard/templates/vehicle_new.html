@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}New Vehicle{% endblock %}
+{% block content %}
+<h3 class="mb-3">Register Vehicle</h3>
+
+{% if error %}
+<div class="alert alert-danger">{{ error }}</div>
+{% endif %}
+
+<div class="card" style="max-width:640px">
+  <div class="card-body">
+    <form method="post">
+      <div class="mb-3">
+        <label class="form-label">Owner Name</label>
+        <input name="owner_name" class="form-control" required>
+      </div>
+      <div class="mb-3">
+        <label class="form-label">Registration Number</label>
+        <input name="registration_no" class="form-control"
+               placeholder="KDA 123A" required>
+      </div>
+      <div class="mb-3">
+        <label class="form-label">Vehicle Type</label>
+        <select name="vehicle_type" class="form-select">
+          <option value="car">Car</option>
+          <option value="bike">Bike</option>
+          <option value="truck">Truck</option>
+          <option value="bus">Bus</option>
+        </select>
+      </div>
+      <div class="mb-3">
+        <label class="form-label">Valid for (days)</label>
+        <input name="valid_days" type="number" value="365"
+               min="1" max="3650" class="form-control">
+      </div>
+      <button class="btn btn-success">Register &amp; Generate QR</button>
+      <a href="/vehicles" class="btn btn-outline-secondary">Cancel</a>
+    </form>
+  </div>
+</div>
+{% endblock %}

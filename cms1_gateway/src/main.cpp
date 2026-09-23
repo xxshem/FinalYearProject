@@ -79,7 +79,12 @@ void loop() {
     int sz = LoRa.parsePacket();
     if (sz) {
         String out = (currentCh == 1) ? "C1:" : "C2:";
-        while (LoRa.available()) out += (char)LoRa.read();
-        Serial.println(out);
+        if (currentCh == 1) {
+        // prefix with metrics: C1:<rssi>,<snr>:<payload>
+        out += String(LoRa.packetRssi()) + "," +
+                String(LoRa.packetSnr(), 1) + ":";
     }
+    while (LoRa.available()) out += (char)LoRa.read();
+    Serial.println(out);
+}
 }
