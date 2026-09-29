@@ -10,12 +10,13 @@ is treated as a legitimate departure (not a clone).
 import sys, os, sqlite3, time, hashlib, secrets, base64
 from datetime import datetime, timedelta
 
-sys.path.append(os.path.expanduser("~/vvs/scripts"))
-sys.path.append(os.path.expanduser("~/vvs/lora"))
+VVS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.join(VVS_DIR, "scripts"))
+sys.path.insert(0, os.path.join(VVS_DIR, "lora"))
 
 from config import DB_PATH
 from qr_handler import QRHandler
-from lora.gate_listener import verify_and_authorize, CLONE_WINDOW_SEC
+from gate_listener import verify_and_authorize, CLONE_WINDOW_SEC
 
 TEST_REG = "TEST-ANYGATE-001"
 

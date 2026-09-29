@@ -9,7 +9,8 @@ User=pi
 Group=pi
 WorkingDirectory=/home/pi/vvs/dashboard
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/usr/bin/python3 /home/pi/vvs/dashboard/app.py
+EnvironmentFile=-/home/pi/vvs.env
+ExecStart=/home/pi/vvs-venv/bin/python3 /home/pi/vvs/dashboard/app.py
 Restart=always
 RestartSec=5
 

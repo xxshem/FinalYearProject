@@ -30,23 +30,28 @@ pip install -r ~/cms1-deploy-kit/requirements.txt
 echo "[3/6] Adding user to dialout group for serial access..."
 sudo usermod -aG dialout pi
 
+# Create a private per-install signing key shared by the dashboard and listener.
+if [ ! -f "$HOME/vvs.env" ]; then
+    umask 077
+    printf 'VVS_QR_SECRET=%s\n' "$(python3 -c 'import secrets; print(secrets.token_hex(32))')" > "$HOME/vvs.env"
+fi
+chmod 600 "$HOME/vvs.env"
+
 # 5. Initialize database
 echo "[4/6] Initializing SQLite database..."
 python ~/vvs/scripts/init_db.py
 
 # 6. Install systemd services
 echo "[5/6] Installing systemd services..."
-sudo cp ~/cms1-deploy-kit/systemd/*.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable vvs-dashboard vvs-listener vvs-sync
-
-# 7. Patch systemd to use venv python
-echo "[6/6] Patching service ExecStart paths for venv..."
-for svc in vvs-dashboard vvs-listener vvs-sync; do
-    sudo sed -i "s|/usr/bin/python3|/home/pi/vvs-venv/bin/python3|g" \
-        /etc/systemd/system/${svc}.service
+for svc in vvs-sync vvs-sysc; do
+    sudo systemctl disable --now "${svc}.service" 2>/dev/null || true
+    sudo rm -f "/etc/systemd/system/${svc}.service"
 done
+sudo cp ~/cms1-deploy-kit/systemd/vvs-dashboard.service /etc/systemd/system/
+sudo cp ~/cms1-deploy-kit/systemd/vvs-listener.service /etc/systemd/system/
 sudo systemctl daemon-reload
+sudo systemctl enable vvs-dashboard vvs-listener
+echo "[6/6] CMS1 services configured (one process owns the LoRa serial port)."
 
 echo ""
 echo "================================================"
@@ -58,6 +63,5 @@ echo "  1. Reboot: sudo reboot"
 echo "  2. After boot, verify services:"
 echo "       systemctl status vvs-dashboard"
 echo "       systemctl status vvs-listener"
-echo "       systemctl status vvs-sync"
 echo "  3. Open dashboard: http://<pi-ip>:5000"
 echo ""

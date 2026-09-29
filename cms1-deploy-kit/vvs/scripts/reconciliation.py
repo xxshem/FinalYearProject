@@ -9,10 +9,10 @@ from datetime import datetime, timedelta
 DB = os.path.expanduser("~/vvs/database/vvs.db")
 
 TIMESTAMP_COL = {
-    "vehicles":            "created_at",
-    "gates":               "created_at",
+    "vehicles":            "updated_at",
+    "gates":               "updated_at",
     "verification_logs":   "scan_time",
-    "entry_exit":          "entry_time",
+    "entry_exit":          "updated_at",
     "lora_metrics":        "timestamp",
     "operational_metrics": "timestamp",
     "power_metrics":       "timestamp",

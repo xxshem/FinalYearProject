@@ -8,7 +8,8 @@ CREATE TABLE IF NOT EXISTS vehicles (
     valid_from       DATE NOT NULL,
     valid_to         DATE NOT NULL,
     is_active        INTEGER DEFAULT 1,
-    created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS gates (
@@ -17,7 +18,8 @@ CREATE TABLE IF NOT EXISTS gates (
     description TEXT,
     status      TEXT DEFAULT 'offline',
     last_seen   TIMESTAMP,
-    created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS verification_logs (
@@ -40,7 +42,8 @@ CREATE TABLE IF NOT EXISTS entry_exit (
     entry_time       TIMESTAMP NOT NULL,
     exit_gate        TEXT,
     exit_time        TIMESTAMP,
-    duration_minutes REAL
+    duration_minutes REAL,
+    updated_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS lora_metrics (

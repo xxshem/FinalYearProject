@@ -25,6 +25,7 @@
 // ── Configuration ─────────────────────────────────────
 String GATE_ID = "GATE_A";        // runtime-changeable default
 #define DEVICE_ID 0x01
+uint32_t bootId = 0;
 
 // LoRa pins (ESP32-CAM)
 #define LORA_SS    13
@@ -45,13 +46,14 @@ String GATE_ID = "GATE_A";        // runtime-changeable default
 #define PCF_BUZZER     2
 
 #define FREQ_CH1   868.1E6
+#define REPLY_TIMEOUT_MS 6000
 
 LiquidCrystal_I2C lcd(LCD_ADDR, 16, 2);
 uint16_t seq = 0;
 
 // ── Forward declarations ─────────────────────────────
 void initLoRa();
-void sendVerifyRequest(const String& token, const String& fullPayload);
+void sendVerifyRequest(const String& token, const String& fullPayload, uint16_t requestSeq);
 String waitForReply(unsigned long timeoutMs);
 void indicate(bool granted, const String& reg);
 void pcf_write(uint8_t v);
@@ -87,6 +89,7 @@ bool handleSerialCommand(const String& line) {
 void setup() {
     Serial.begin(115200);
     delay(500);
+    bootId = esp_random();
     Serial.println("\n[GATE] booting");
 
     // I2C bus init (shared by LCD + PCF8574)
@@ -129,7 +132,7 @@ void loop() {
             return;
         }
 
-        // Otherwise treat the line as a manual token for bench testing
+        // Otherwise treat the line as a manual signed QR payload for bench testing
         payload = line;
     } else {
         payload = qr_scan_once();
@@ -143,15 +146,15 @@ void loop() {
     int p1 = payload.indexOf('|');
     int p2 = payload.indexOf('|', p1 + 1);
     String token = (p1 > 0 && p2 > p1) ? payload.substring(p1 + 1, p2) : payload;
-    sendVerifyRequest(token, payload);   // pass both
-    
-
     Serial.printf("[GATE] token: %s\n", token.c_str());
     lcd_show("Checking...", token.c_str());
 
-
-
-    String reply = waitForReply(2000);
+    uint16_t requestSeq = seq++;
+    String reply;
+    for (uint8_t attempt = 0; attempt < 3 && reply.length() == 0; ++attempt) {
+        sendVerifyRequest(token, payload, requestSeq);
+        reply = waitForReply(REPLY_TIMEOUT_MS);
+    }
     if (reply.length() == 0) {
         Serial.println("[GATE] timeout");
         indicate(false, "Timeout");
@@ -180,13 +183,13 @@ void initLoRa() {
     Serial.println("[LORA] ready on 868.1 MHz");
 }
 
-void sendVerifyRequest(const String& token, const String& fullPayload) {
+void sendVerifyRequest(const String& token, const String& fullPayload, uint16_t requestSeq) {
     JSONVar o;
     o["type"]    = "VERIFY_REQ";
     o["gate"]    = GATE_ID;
-    o["token"]   = token;         // legacy fallback
+    o["boot"]    = bootId;
     o["payload"] = fullPayload;   // full vid|token|signature
-    o["seq"]     = seq++;
+    o["seq"]     = requestSeq;
     String body = JSON.stringify(o);
 
     LoRa.beginPacket();

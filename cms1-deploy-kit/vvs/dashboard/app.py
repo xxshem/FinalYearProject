@@ -5,7 +5,7 @@ from flask import (Flask, render_template, request, jsonify,
 import sqlite3, os, io, csv, hashlib, secrets, base64
 from datetime import datetime, timedelta
 
-sys_path = os.path.expanduser("~/vvs/scripts")
+sys_path = os.path.expanduser("~/vvs")
 import sys
 sys.path.append(sys_path)
 from scripts.qr_handler import QRHandler

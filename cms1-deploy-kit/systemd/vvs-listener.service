@@ -10,7 +10,8 @@ Group=pi
 ExecStartPre=/bin/sleep 5
 WorkingDirectory=/home/pi/vvs/lora
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/usr/bin/python3 /home/pi/vvs/lora/gate_listener.py
+EnvironmentFile=-/home/pi/vvs.env
+ExecStart=/home/pi/vvs-venv/bin/python3 /home/pi/vvs/lora/gate_listener.py
 Restart=always
 RestartSec=10
 

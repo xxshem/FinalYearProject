@@ -1,8 +1,10 @@
-import hashlib, hmac
+import hashlib, hmac, os
 
 class QRHandler:
-    def __init__(self, secret_key="dkut-vvs-2026"):
-        self.secret_key = secret_key
+    def __init__(self, secret_key=None):
+        self.secret_key = secret_key or os.environ.get("VVS_QR_SECRET")
+        if not self.secret_key:
+            raise RuntimeError("VVS_QR_SECRET must be configured")
 
     def generate_signature(self, vid, token):
         msg = f"{vid}:{token}"

@@ -36,9 +36,8 @@ Software running (check CMS1 via SSH):
   $ ssh pi@<CMS1-IP>
   $ systemctl status vvs-dashboard --no-pager
   $ systemctl status vvs-listener  --no-pager
-  $ systemctl status vvs-sync      --no-pager
 
-[ ] All three services show "active (running)"
+[ ] Both CMS1 services show "active (running)"
 [ ] Dashboard reachable at http://<CMS1-IP>:5000
 [ ] Test vehicle exists in DB (see Section 1)
 
@@ -75,6 +74,7 @@ Step 1.2 — Confirm test vehicle exists
 
 Step 1.3 — Generate and print QR code
 
+  $ source ~/vvs.env
   $ python3 -c "
   import sqlite3, os, qrcode
   DB = os.path.expanduser('~/vvs/database/vvs.db')
@@ -337,13 +337,14 @@ Expected output: 0
 Step 4.4 — Optional: Cross-CMS verification
 
   On CMS2 (Window B):
-  $ journalctl -u vvs-sync-client -n 20
+  $ sudo journalctl -u vvs-sync-client@pi -n 20
 
-  Expected within 10 seconds of each scan:
-    [SYNC-RX] inserted=N updated=0 kept=0
+  Expected within about one minute of the CMS1 update:
+    [SYNC-RX] <transfer-id> ok=True
 
-  Open CMS2 dashboard at http://<CMS2-IP>:5000/logs
-  [ ] Same three rows appear on CMS2
+  Check the mirror database directly:
+  $ sqlite3 ~/vvs/database/vvs.db "SELECT COUNT(*) FROM verification_logs;"
+  [ ] The CMS2 verification log count includes the CMS1 scans
 
 ═══════════════════════════════════════════════════════════════════════════════
 SECTION 5 — CLONE DETECTION (OPTIONAL BONUS DEMO)
