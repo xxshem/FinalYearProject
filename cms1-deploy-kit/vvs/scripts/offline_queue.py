@@ -2,7 +2,10 @@
 import sqlite3, os, json
 from datetime import datetime
 
-DB = os.path.expanduser("~/vvs/database/vvs.db")
+try:
+    from vvs.scripts.config import DB_PATH as DB
+except ImportError:
+    from config import DB_PATH as DB
 
 def enqueue(op_type, vehicle_id=None, gate_id=None, qr_token=None, payload=None):
     c = sqlite3.connect(DB)

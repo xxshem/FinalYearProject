@@ -8,6 +8,7 @@ try:
     from vvs.scripts.config import DB_PATH
     from vvs.scripts.offline_queue import enqueue
     from vvs.scripts.qr_handler import QRHandler
+    from vvs.scripts.init_db import init as init_database
     from vvs.lora.lora_sync_server import SyncPublisher
 except ImportError:
     # Keep direct execution from the vvs/lora directory working as well.
@@ -15,6 +16,7 @@ except ImportError:
     from config import DB_PATH  # type: ignore[import-not-found]
     from offline_queue import enqueue  # type: ignore[import-not-found]
     from qr_handler import QRHandler  # type: ignore[import-not-found]
+    from init_db import init as init_database  # type: ignore[import-not-found]
     from lora_sync_server import SyncPublisher  # type: ignore[import-not-found]
 
 SERIAL_PORT = os.environ.get("VVS_SERIAL_PORT", "/dev/ttyUSB0")
@@ -22,7 +24,8 @@ BAUD = 115200
 CLONE_WINDOW_SEC = 5
 REQUEST_CACHE = OrderedDict()
 
-def verify_and_authorize(payload, gate_id, request_id=None):
+def verify_and_authorize(payload, gate_id, request_id=None, radio_metrics=None):
+    processing_started = time.perf_counter()
     cache_key = (gate_id, str(request_id)) if request_id is not None else None
     if cache_key in REQUEST_CACHE:
         cached_payload, cached_response = REQUEST_CACHE[cache_key]
@@ -38,6 +41,7 @@ def verify_and_authorize(payload, gate_id, request_id=None):
     now_text = now.isoformat(sep=" ", timespec="seconds")
     c = sqlite3.connect(DB_PATH)
     c.row_factory = sqlite3.Row
+    db_query_started = time.perf_counter()
     row = c.execute("SELECT * FROM vehicles WHERE qr_token=?", (token,)).fetchone()
     granted = False
     reason = "invalid QR code"
@@ -101,6 +105,26 @@ def verify_and_authorize(payload, gate_id, request_id=None):
          "granted" if granted else "denied", reason or None))
     c.execute("UPDATE gates SET status='online', last_seen=? WHERE gate_id=?",
               (now_text, gate_id))
+
+    db_query_ms = (time.perf_counter() - db_query_started) * 1000
+    response_time_ms = (time.perf_counter() - processing_started) * 1000
+    rssi_dbm = radio_metrics.get("rssi_dbm") if radio_metrics else None
+    snr_db = radio_metrics.get("snr_db") if radio_metrics else None
+    metric_id = str(request_id or f"{gate_id}-{now.strftime('%Y%m%d%H%M%S%f')}")
+    c.execute("""INSERT INTO lora_metrics
+        (test_id, gate_id, channel, rssi_dbm, snr_db, packets_sent,
+         packets_received, pdr_percent, latency_ms, test_environment, notes)
+        VALUES (?, ?, 1, ?, ?, 1, 1, 100, ?, 'runtime', ?)""",
+        (metric_id, gate_id, rssi_dbm, snr_db, response_time_ms,
+         "CMS1 processing latency; radio receive measurements"))
+    queue_size = c.execute(
+        "SELECT COUNT(*) FROM offline_queue WHERE status='pending'").fetchone()[0]
+    c.execute("""INSERT INTO operational_metrics
+        (test_id, gate_id, response_time_ms, cache_hit, db_query_ms,
+         offline_mode, queue_size, notes)
+        VALUES (?, ?, ?, 0, ?, 0, ?, ?)""",
+        (metric_id, gate_id, response_time_ms, db_query_ms, queue_size,
+         f"{action or 'denied'}; request handling time on CMS1"))
     c.commit()
     c.close()
 
@@ -113,7 +137,8 @@ def verify_and_authorize(payload, gate_id, request_id=None):
         print(f"[CMS1] offline queue error: {exc}")
 
     response = {"type": "VERIFY_RESP", "granted": granted, "reason": reason,
-                "reg": row["registration_no"] if row else "", "action": action}
+                "reg": row["registration_no"] if row else "", "action": action,
+                "response_time_ms": round(response_time_ms, 2)}
     if cache_key is not None:
         REQUEST_CACHE[cache_key] = (payload, response)
         if len(REQUEST_CACHE) > 128:
@@ -122,24 +147,25 @@ def verify_and_authorize(payload, gate_id, request_id=None):
 
 def read_tagged(ser):
     raw = ser.readline().decode("utf-8", errors="ignore").strip()
-    if not raw: return None, None
+    if not raw: return None, None, None
     if raw.startswith("C1:"):
         payload = raw[3:]
+        radio_metrics = None
         metrics, separator, candidate = payload.partition(":")
         if separator and "," in metrics:
             try:
                 rssi, snr = metrics.split(",", 1)
-                float(rssi)
-                float(snr)
+                radio_metrics = {"rssi_dbm": float(rssi), "snr_db": float(snr)}
             except ValueError:
                 pass
             else:
                 payload = candidate
-        return 1, payload
-    if raw.startswith("C2:"): return 2, raw[3:]
-    return None, None
+        return 1, payload, radio_metrics
+    if raw.startswith("C2:"): return 2, raw[3:], None
+    return None, None, None
 
 def main():
+    init_database()
     print(f"[CMS1] listening on {SERIAL_PORT}")
     try:
         ser = serial.Serial(SERIAL_PORT, BAUD, timeout=0.2)
@@ -150,18 +176,25 @@ def main():
     sync_publisher = SyncPublisher()
     while True:
         try:
-            ch, payload = read_tagged(ser)
+            ch, payload, radio_metrics = read_tagged(ser)
             if ch is not None:
                 pkt = json.loads(payload)
                 if ch == 2:
                     sync_publisher.handle_ack(pkt)
                 elif ch == 1 and pkt.get("type") == "VERIFY_REQ":
-                    gate_id = pkt.get("gate", "UNKNOWN")
-                    request_id = (f"{pkt.get('boot')}:{pkt.get('seq')}"
-                                  if "seq" in pkt else None)
-                    resp = verify_and_authorize(pkt.get("payload", ""), gate_id, request_id)
-                    ser.write(("C1:" + json.dumps(resp) + "\n").encode())
-                    print(f"[CMS1] {gate_id} granted={resp['granted']} "
+                      gate_id = pkt.get("gate", "UNKNOWN")
+                      request_id = (f"{pkt.get('boot')}:{pkt.get('seq')}"
+                                if "seq" in pkt else None)
+                      request_started = time.perf_counter()
+                      resp = verify_and_authorize(
+                        pkt.get("payload", ""), gate_id, request_id, radio_metrics)
+                      ser.write(("C1:" + json.dumps(resp) + "\n").encode())
+                      metrics = radio_metrics or {}
+                      print(f"[METRICS] {gate_id} RSSI={metrics.get('rssi_dbm', 'n/a')} dBm "
+                          f"SNR={metrics.get('snr_db', 'n/a')} dB "
+                          f"Latency={(time.perf_counter() - request_started) * 1000:.1f} ms "
+                          f"Response={resp['response_time_ms']} ms")
+                      print(f"[CMS1] {gate_id} granted={resp['granted']} "
                           f"action={resp['action']} reason={resp['reason']}")
             sync_publisher.poll(ser)
         except json.JSONDecodeError: continue

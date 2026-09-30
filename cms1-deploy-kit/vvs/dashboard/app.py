@@ -8,11 +8,10 @@ from datetime import datetime, timedelta
 sys_path = os.path.expanduser("~/vvs")
 import sys
 sys.path.append(sys_path)
+from scripts.config import DB_PATH as DB
 from scripts.qr_handler import QRHandler
 
 app = Flask(__name__)
-DB = os.path.expanduser("~/vvs/database/vvs.db")
-
 ALL_TABLES = ["vehicles", "gates", "verification_logs", "entry_exit",
               "lora_metrics", "operational_metrics", "power_metrics",
               "system_events", "offline_queue"]

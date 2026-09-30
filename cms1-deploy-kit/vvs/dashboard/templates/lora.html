@@ -2,6 +2,16 @@
 {% block title %}LoRa Metrics{% endblock %}
 {% block content %}
 <h3 class="mb-4">LoRa Communication Metrics</h3>
+{% if rows %}
+{% set latest = rows[0] %}
+<div class="alert alert-success py-2" role="status">
+  Latest scan: <strong>{{ latest.gate_id or 'unknown gate' }}</strong>
+  · RSSI: <strong>{{ latest.rssi_dbm if latest.rssi_dbm is not none else 'n/a' }} dBm</strong>
+  · SNR: <strong>{{ latest.snr_db if latest.snr_db is not none else 'n/a' }} dB</strong>
+  · CMS1 latency: <strong>{{ latest.latency_ms if latest.latency_ms is not none else 'n/a' }} ms</strong>
+  · {{ latest.timestamp }}
+</div>
+{% endif %}
 
 <div class="row g-3 mb-4">
   <div class="col-md-6">
@@ -59,9 +69,11 @@
 <script>
 
 const chartRows = JSON.parse(document.getElementById('loraChartData').textContent);
+setTimeout(() => window.location.reload(), 5000);
 
 if (chartRows.length) {
-  const labels = chartRows.map(r => r.distance_m + 'm');
+  const labels = chartRows.map(r => r.distance_m == null
+    ? (r.gate_id || r.test_id) : r.distance_m + 'm');
   new Chart(document.getElementById('rssiChart'), {
     type: 'line',
     data: { labels, datasets: [{

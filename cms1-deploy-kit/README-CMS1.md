@@ -111,6 +111,52 @@ generation, load the install-specific signing key first:
 Keep `~/vvs.env` backed up securely. Existing QR codes signed with an earlier
 key must be regenerated after the key is changed.
 
+## Any-Gate Demo
+
+Initialize the database and create the idempotent `DEMO-001` bike record and
+QR image:
+
+    cd ~/vvs/scripts
+    python3 init_demo.py
+
+The command prints the signed QR payload and saves `demo_qr.png` beside the
+database. If no signing key exists, it creates one in `~/vvs.env`; keep that
+file shared with the listener service. For a local test database, set
+`VVS_DB_PATH` before running the command.
+
+Connect the ESP32-CAM scanner's USB serial adapter to the operator computer
+(this is separate from the CMS1 gateway serial port), then assign its logical
+gate before scanning:
+
+    python3 ~/vvs/scripts/set_gate.py --gate A --port /dev/ttyUSB1
+
+Scan the demo QR to record entry at `GATE_A`, then reassign and scan again to
+record an any-gate exit:
+
+    python3 ~/vvs/scripts/set_gate.py --gate B --port /dev/ttyUSB1
+
+The dashboard's `/logs`, `/lora`, and `/operational` pages refresh every five
+seconds and show the audit trail, RSSI/SNR, CMS1 processing latency, response
+time, and DB query time. Latency is CMS1 request handling time, not a measured
+over-the-air round trip.
+
+## Database Integrity Enhancements
+
+Fresh databases declare foreign keys from `entry_exit.vehicle_id` to the
+internal `vehicles.vehicle_id` key, from `entry_exit.entry_gate` and
+`entry_exit.exit_gate` to `gates.gate_id`, and from `verification_logs` to the
+same vehicle and gate keys. `vehicles.vid` remains the signed QR identifier;
+the runtime and demo scripts use integer `vehicle_id` for relational joins.
+Validity dates, active-state values, and verification outcomes have checks,
+and foreign-key/audit columns are indexed.
+
+SQLite cannot add foreign-key or check constraints to existing columns with
+`ALTER TABLE`. The idempotent triggers in `database/schema.sql` therefore
+validate vehicle and gate references on legacy inserts/updates and prevent
+deleting referenced vehicle/gate history. `init_db.py` applies those triggers
+without dropping existing data. Existing malformed rows are not rewritten;
+back up and audit the database before deployment.
+
 ## Common Commands
 
 | Task | Command |

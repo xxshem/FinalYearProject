@@ -4,6 +4,17 @@ class QRHandler:
     def __init__(self, secret_key=None):
         self.secret_key = secret_key or os.environ.get("VVS_QR_SECRET")
         if not self.secret_key:
+            env_file = os.path.expanduser("~/vvs.env")
+            try:
+                with open(env_file, encoding="utf-8") as stream:
+                    for line in stream:
+                        key, separator, value = line.strip().partition("=")
+                        if separator and key == "VVS_QR_SECRET":
+                            self.secret_key = value.strip().strip("\"'")
+                            break
+            except OSError:
+                pass
+        if not self.secret_key:
             raise RuntimeError("VVS_QR_SECRET must be configured")
 
     def generate_signature(self, vid, token):

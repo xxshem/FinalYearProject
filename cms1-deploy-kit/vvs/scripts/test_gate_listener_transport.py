@@ -40,25 +40,28 @@ class GateListenerTransportTests(unittest.TestCase):
         expected = {"type": "VERIFY_REQ", "gate": "GATE_A", "token": "abc"}
         line = "C1:-112,7.5:" + json.dumps(expected) + "\n"
 
-        channel, payload = read_tagged(SerialLine(line))
+        channel, payload, metrics = read_tagged(SerialLine(line))
 
         self.assertEqual(channel, 1)
         self.assertEqual(json.loads(payload), expected)
+        self.assertEqual(metrics, {"rssi_dbm": -112.0, "snr_db": 7.5})
 
     def test_reads_documented_channel_one_payload_without_metrics(self):
         expected = {"type": "VERIFY_REQ", "gate": "GATE_A", "token": "abc"}
         line = "C1:" + json.dumps(expected) + "\n"
 
-        channel, payload = read_tagged(SerialLine(line))
+        channel, payload, metrics = read_tagged(SerialLine(line))
 
         self.assertEqual(channel, 1)
         self.assertEqual(json.loads(payload), expected)
+        self.assertIsNone(metrics)
 
     def test_preserves_channel_two_payload(self):
-        channel, payload = read_tagged(SerialLine("C2:{\"type\":\"SYNC_BEGIN\"}\n"))
+        channel, payload, metrics = read_tagged(SerialLine("C2:{\"type\":\"SYNC_BEGIN\"}\n"))
 
         self.assertEqual(channel, 2)
         self.assertEqual(payload, '{"type":"SYNC_BEGIN"}')
+        self.assertIsNone(metrics)
 
 
 class GateAuthorizationTests(unittest.TestCase):
@@ -120,6 +123,26 @@ class GateAuthorizationTests(unittest.TestCase):
         finally:
             connection.close()
 
+    def test_verification_persists_radio_and_operational_metrics(self):
+        result = gate_listener.verify_and_authorize(
+            self.payload, "GATE_A", "GATE_A:telemetry",
+            {"rssi_dbm": -85.0, "snr_db": 8.5})
+
+        self.assertTrue(result["granted"])
+        connection = sqlite3.connect(self.db_path)
+        try:
+            radio = connection.execute("""SELECT gate_id, channel, rssi_dbm,
+                snr_db, latency_ms FROM lora_metrics""").fetchone()
+            operational = connection.execute("""SELECT gate_id, response_time_ms,
+                db_query_ms FROM operational_metrics""").fetchone()
+        finally:
+            connection.close()
+        self.assertEqual(radio[:4], ("GATE_A", 1, -85.0, 8.5))
+        self.assertGreaterEqual(radio[4], 0)
+        self.assertEqual(operational[0], "GATE_A")
+        self.assertGreaterEqual(operational[1], 0)
+        self.assertGreaterEqual(operational[2], 0)
+
     def test_detects_clone_then_allows_exit_and_reentry(self):
         first = gate_listener.verify_and_authorize(self.payload, "GATE_A")
         clone = gate_listener.verify_and_authorize(self.payload, "GATE_B")
@@ -156,6 +179,40 @@ class GateAuthorizationTests(unittest.TestCase):
 
 
 class DatabaseMigrationTests(unittest.TestCase):
+    def test_new_schema_declares_foreign_keys_and_indexes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db_path = Path(directory) / "vvs.db"
+            schema_path = Path(__file__).resolve().parents[1] / "database" / "schema.sql"
+            connection = sqlite3.connect(db_path)
+            try:
+                connection.executescript(schema_path.read_text(encoding="utf-8"))
+                entry_exit_fks = {(row[2], row[3], row[4]) for row in
+                                  connection.execute("PRAGMA foreign_key_list(entry_exit)")}
+                log_fks = {(row[2], row[3], row[4]) for row in
+                           connection.execute("PRAGMA foreign_key_list(verification_logs)")}
+                entry_indexes = {row[1] for row in
+                                 connection.execute("PRAGMA index_list(entry_exit)")}
+                log_indexes = {row[1] for row in
+                               connection.execute("PRAGMA index_list(verification_logs)")}
+            finally:
+                connection.close()
+
+        self.assertEqual(entry_exit_fks, {
+            ("vehicles", "vehicle_id", "vehicle_id"),
+            ("gates", "entry_gate", "gate_id"),
+            ("gates", "exit_gate", "gate_id"),
+        })
+        self.assertEqual(log_fks, {
+            ("vehicles", "vehicle_id", "vehicle_id"),
+            ("gates", "gate_id", "gate_id"),
+        })
+        self.assertIn("idx_entry_vehicle", entry_indexes)
+        self.assertIn("idx_entry_gate", entry_indexes)
+        self.assertIn("idx_exit_gate", entry_indexes)
+        self.assertIn("idx_verif_vehicle", log_indexes)
+        self.assertIn("idx_verif_gate", log_indexes)
+        self.assertIn("idx_verif_time", log_indexes)
+
     def test_adds_sync_timestamps_to_legacy_database(self):
         with tempfile.TemporaryDirectory() as directory:
             db_path = Path(directory) / "vvs.db"
@@ -199,13 +256,34 @@ class DatabaseMigrationTests(unittest.TestCase):
                     "PRAGMA table_info(entry_exit)")}
                 triggers = {row[0] for row in connection.execute(
                     "SELECT name FROM sqlite_master WHERE type='trigger'")}
+                connection.execute("""INSERT INTO vehicles
+                    (vehicle_id, vid, owner_name, registration_no, vehicle_type,
+                     qr_token, valid_from, valid_to, is_active)
+                    VALUES (1, 'legacy-vid', 'Legacy User', 'LEGACY-001', 'bike',
+                            'legacy-token', '2026-01-01', '2027-01-01', 1)""")
+                with self.assertRaises(sqlite3.IntegrityError):
+                    connection.execute("""INSERT INTO entry_exit
+                        (vehicle_id, entry_gate, entry_time)
+                        VALUES (999, 'GATE_A', CURRENT_TIMESTAMP)""")
+                with self.assertRaises(sqlite3.IntegrityError):
+                    connection.execute("""INSERT INTO entry_exit
+                        (vehicle_id, entry_gate, entry_time)
+                        VALUES (1, 'UNKNOWN_GATE', CURRENT_TIMESTAMP)""")
+                connection.execute("""INSERT INTO entry_exit
+                    (vehicle_id, entry_gate, entry_time)
+                    VALUES (1, 'GATE_A', CURRENT_TIMESTAMP)""")
+                connection.commit()
             finally:
                 connection.close()
 
             self.assertIn("updated_at", vehicle_columns)
             self.assertIn("updated_at", gate_columns)
             self.assertIn("updated_at", entry_exit_columns)
-            self.assertEqual(len(triggers), 6)
+            self.assertTrue({
+                "entry_exit_integrity_insert", "entry_exit_integrity_update",
+                "verification_logs_integrity_insert", "verification_logs_integrity_update",
+                "vehicles_restrict_delete", "gates_restrict_delete",
+            }.issubset(triggers))
 
 
 class SyncProtocolTests(unittest.TestCase):
@@ -254,12 +332,21 @@ class SyncProtocolTests(unittest.TestCase):
             connection = sqlite3.connect(db_path)
             try:
                 connection.executescript(schema_path.read_text(encoding="utf-8"))
+                today = datetime.now().date()
+                vehicle_cursor = connection.execute("""INSERT INTO vehicles
+                    (vid, owner_name, registration_no, vehicle_type, qr_token,
+                     valid_from, valid_to)
+                    VALUES ('sync-vid', 'Sync Owner', 'SYNC-001', 'bike',
+                            'sync-token', ?, ?)""",
+                    (today.isoformat(), (today + timedelta(days=1)).isoformat()))
+                vehicle_id = vehicle_cursor.lastrowid
                 connection.execute("""INSERT INTO verification_logs
-                    (gate_id, qr_token, scan_time, verification_result)
-                    VALUES ('GATE_A', 'sync-token', CURRENT_TIMESTAMP, 'granted')""")
+                    (vehicle_id, gate_id, qr_token, scan_time, verification_result)
+                    VALUES (?, 'GATE_A', 'sync-token', CURRENT_TIMESTAMP, 'granted')""",
+                    (vehicle_id,))
                 connection.execute("""INSERT INTO entry_exit
                     (vehicle_id, entry_gate, entry_time)
-                    VALUES (1, 'GATE_A', CURRENT_TIMESTAMP)""")
+                    VALUES (?, 'GATE_A', CURRENT_TIMESTAMP)""", (vehicle_id,))
                 connection.commit()
             finally:
                 connection.close()
@@ -276,12 +363,12 @@ class SyncProtocolTests(unittest.TestCase):
             connection = sqlite3.connect(db_path)
             try:
                 connection.executescript(schema_path.read_text(encoding="utf-8"))
-                today = datetime.now().date().isoformat()
+                today = datetime.now().date()
                 connection.execute("""INSERT INTO vehicles
                     (vid, owner_name, registration_no, vehicle_type, qr_token,
                      valid_from, valid_to) VALUES (?, ?, ?, ?, ?, ?, ?)""",
                     ("v" * 32, "Test Owner", "FRAME-001", "car", "t" * 22,
-                     today, today))
+                     today.isoformat(), (today + timedelta(days=1)).isoformat()))
                 connection.commit()
             finally:
                 connection.close()

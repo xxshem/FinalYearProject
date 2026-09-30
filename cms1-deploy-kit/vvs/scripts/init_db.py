@@ -1,14 +1,20 @@
 #!/usr/bin/env python3
-import sqlite3, os
+import os
+import sqlite3
 
-DB = os.path.expanduser("~/vvs/database/vvs.db")
-SCHEMA = os.path.expanduser("~/vvs/database/schema.sql")
+try:
+    from vvs.scripts.config import DB_PATH
+except ImportError:
+    from config import DB_PATH
+
+DB = DB_PATH
+SCHEMA = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "database", "schema.sql"))
 
 def init():
     os.makedirs(os.path.dirname(DB), exist_ok=True)
     conn = sqlite3.connect(DB)
     try:
-        with open(SCHEMA) as f:
+        with open(SCHEMA, encoding="utf-8") as f:
             conn.executescript(f.read())
         timestamp_columns = {
             "vehicles": "created_at",
