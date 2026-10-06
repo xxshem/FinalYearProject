@@ -1,7 +1,7 @@
 # CMS2 LoRa Gateway — ESP32 Dev + SX1278
 
 ## Role
-Single-channel modem locked to CH2 (868.5 MHz), using spreading factor 7 to
+Single-channel modem locked to CH2 (433.5 MHz), using spreading factor 7 to
 match CMS1 sync frames. Receives database sync from CMS1. Plain passthrough,
 with no channel prefix in the USB protocol.
 

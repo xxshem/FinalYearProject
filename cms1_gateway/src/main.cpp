@@ -19,8 +19,8 @@
 #define LORA_RST   14
 #define LORA_DIO0  2
 
-#define FREQ_CH1   868.1E6
-#define FREQ_CH2   868.5E6
+#define FREQ_CH1   433.1E6
+#define FREQ_CH2   433.5E6
 
 int      currentCh = 1;
 

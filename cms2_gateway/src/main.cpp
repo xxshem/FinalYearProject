@@ -1,5 +1,5 @@
 /*
- * CMS2 LoRa Gateway Modem — Locked to CH2 (868.5 MHz)
+ * CMS2 LoRa Gateway Modem — Locked to CH2 (433.5 MHz)
  * Plain passthrough: USB <-> LoRa.
  */
 
@@ -10,7 +10,7 @@
 #define LORA_SS    5
 #define LORA_RST   14
 #define LORA_DIO0  2
-#define FREQ_CH2   868.5E6
+#define FREQ_CH2   433.5E6
 
 void setup() {
     Serial.begin(115200);

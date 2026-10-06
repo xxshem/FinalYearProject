@@ -2,27 +2,35 @@
 
 ## Role
 Standalone gate scanner. Reads signed QR codes, sends verification requests
-over LoRa CH1 (868.1 MHz), retries timed-out requests with the same sequence
-number, and shows the result via LCD, LED, and buzzer.
+over UART to the ESP-12E LoRa bridge, retries timed-out requests with the same
+sequence number, and shows the result via LCD, LED, and buzzer. The ESP-12E
+bridge sends requests over LoRa CH1 (433.1 MHz).
 
 ## Pins
-| SX1278 | ESP32-CAM |
-|---|---|
-| VCC    | 3.3V       |
-| GND    | GND        |
-| SCK    | GPIO 14    |
-| MISO   | GPIO 2     |
-| MOSI   | GPIO 15    |
-| NSS    | GPIO 13    |
-| RESET  | GPIO 12    |
-| DIO0   | GPIO 4     |
+Do not connect the SX1278 directly to the ESP32-CAM. Connect the radio to the
+ESP-12E using the pin map in [`esp8266_lora_bridge/README.md`](../esp8266_lora_bridge/README.md).
 
-The LCD and PCF8574 expander share I2C:
+The UART bridge uses ESP32-CAM GPIO 13 (RX) and GPIO 14 (TX); leave the
+microSD slot unused. Connect ESP32 GPIO 14 (TX) to ESP8266 GPIO 3 (RX), ESP32
+GPIO 13 (RX) to ESP8266 GPIO 1 (TX), and connect grounds. The inter-board UART
+runs at 115200 baud. Disconnect those two UART wires while programming the
+ESP-12E, because GPIO 1/3 are also its programming UART pins.
+The ESP32-CAM bridge uses UART2, separate from its USB programming UART.
+
+Before sending a verification request, `gate_node` checks the serialized JSON
+body against the SX1278's 255-byte packet limit. The `REQ:` UART prefix and
+newline are not included in that limit. Oversized JSON is rejected locally,
+shown on the LCD, and is not retried or sent to the ESP-12E.
+
+For the AI-Thinker-style ESP32-CAM module with OV2640 and 4 MB PSRAM (the
+ESP32-CAM-MB is the USB programmer carrier), the LCD and PCF8574 expander share
+I2C on GPIO 2 and GPIO 4. Do not use the microSD slot; GPIO 13/14 are used for
+the ESP-12E UART.
 
 | I2C device pin | ESP32-CAM |
 |---|---|
-| SDA | GPIO 16 |
-| SCL | GPIO 0 |
+| SDA | GPIO 2 |
+| SCL | GPIO 4 |
 | VCC | 3.3V |
 | GND | GND |
 
@@ -40,11 +48,17 @@ The LCD and PCF8574 expander share I2C:
 Connect each LED with a series resistor. Confirm the buzzer current is within
 the PCF8574 output rating; use a transistor driver if it is not.
 
-**Pin conflict to resolve before wiring:** the AI-Thinker camera model used by
-this firmware assigns GPIO 0 to camera XCLK, while the firmware also assigns it
-to I2C SCL. GPIO 16 may also be reserved for PSRAM on some ESP32-CAM revisions.
-Verify the board variant and move I2C to available pins before building the
-hardware; update these assignments in `src/main.cpp` at the same time.
+GPIO 2 is a boot-strapping pin, so disconnect the LCD and PCF8574 from the I2C
+bus while serial-flashing the ESP32-CAM. Verify the board boots normally with
+the I2C devices reconnected. GPIO 4 is also connected to the onboard camera
+flash LED; disable or physically disconnect that LED before using GPIO 4 as
+I2C SCL. GPIO 16 is reserved for PSRAM on this module and is not used for I2C.
+The camera's GPIO 0 XCLK pin is no longer assigned to I2C.
+
+**Hardware validation is still required:** after wiring, confirm the camera
+initializes and scan the I2C bus to verify that the LCD (`0x27`) and PCF8574
+(`0x20`) both respond while the camera is operating. A successful PlatformIO
+build does not verify pin-level compatibility or physical bus operation.
 
 ## Build
     pio run
@@ -55,11 +69,17 @@ hardware; update these assignments in `src/main.cpp` at the same time.
 ## Monitor
     pio device monitor
 
-Expected:
+Expected on the ESP32-CAM USB serial monitor:
     [GATE] booting
     [QR] camera ready (ESP32QRCodeReader)
-    [LORA] ready on 868.1 MHz
+    [BRIDGE] ESP-12E UART ready
     [GATE] ready
+
+The ESP-12E bridge is a separate PlatformIO project. Build/upload it from
+`esp8266_lora_bridge` with `pio run` and `pio run --target upload`. Its
+diagnostics are on ESP-12E GPIO 2 (UART1 TX-only), separate from the
+request/reply UART. The bridge expects newline-delimited `REQ:<JSON>` frames
+and returns `RSP:<JSON>` or `ERR:<reason>`.
 
 ## Bench test (no QR)
 Paste a full signed QR payload (`vid|token|signature`) into the serial monitor

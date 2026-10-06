@@ -1,8 +1,8 @@
 # CMS1 LoRa Gateway — ESP32 Dev + SX1278
 
 ## Role
-Single-radio modem. Listens continuously for gate traffic on CH1 (868.1 MHz)
-and briefly switches to CH2 (868.5 MHz) for explicit sync frames. CH1 uses
+Single-radio modem. Listens continuously for gate traffic on CH1 (433.1 MHz)
+and briefly switches to CH2 (433.5 MHz) for explicit sync frames. CH1 uses
 SF12; CH2 uses SF7. The CMS1 listener process exclusively owns USB serial.
 
 ## Pins

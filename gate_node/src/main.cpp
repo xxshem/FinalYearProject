@@ -1,10 +1,10 @@
 /*
- * VVS Gate Node — ESP32-CAM + SX1278 + I2C LCD + PCF8574
+ * VVS Gate Node — ESP32-CAM + ESP-12E LoRa bridge + I2C LCD + PCF8574
  *
  * Verification flow:
  *   1. Capture QR code
  *   2. Extract token
- *   3. Send over LoRa CH1
+ *   3. Send over UART to the LoRa bridge
  *   4. Wait for reply
  *   5. Feedback: LCD text + green/red LED + buzzer
  *
@@ -15,26 +15,26 @@
  */
 
 #include <Arduino.h>
-#include <SPI.h>
-#include <LoRa.h>
 #include <Arduino_JSON.h>
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
 #include "qr_decoder.h"
+#include "lora_packet_limits.h"
 
 // ── Configuration ─────────────────────────────────────
 String GATE_ID = "GATE_A";        // runtime-changeable default
 #define DEVICE_ID 0x01
 uint32_t bootId = 0;
 
-// LoRa pins (ESP32-CAM)
-#define LORA_SS    13
-#define LORA_RST   12
-#define LORA_DIO0  4
+// UART2 link to the ESP-12E LoRa bridge. Leave the microSD slot unused.
+#define BRIDGE_UART_RX  13
+#define BRIDGE_UART_TX  14
+#define BRIDGE_BAUD     115200
+#define BRIDGE_TIMEOUT_MS 20000  // SF12 transmit airtime plus the radio reply timeout
 
-// I2C bus (shared by LCD and PCF8574)
-#define I2C_SDA    16
-#define I2C_SCL    0
+// I2C bus (shared by LCD and PCF8574); see README boot/flash LED precautions.
+#define I2C_SDA    2
+#define I2C_SCL    4
 
 // I2C device addresses — update from i2c_scan results
 #define LCD_ADDR   0x27
@@ -45,16 +45,13 @@ uint32_t bootId = 0;
 #define PCF_LED_RED    1
 #define PCF_BUZZER     2
 
-#define FREQ_CH1   868.1E6
-#define REPLY_TIMEOUT_MS 6000
-
 LiquidCrystal_I2C lcd(LCD_ADDR, 16, 2);
+HardwareSerial RadioBridge(2);
 uint16_t seq = 0;
 
 // ── Forward declarations ─────────────────────────────
-void initLoRa();
-void sendVerifyRequest(const String& token, const String& fullPayload, uint16_t requestSeq);
-String waitForReply(unsigned long timeoutMs);
+bool sendVerifyRequest(const String& fullPayload, uint16_t requestSeq);
+String waitForBridgeReply(unsigned long timeoutMs);
 void indicate(bool granted, const String& reg);
 void pcf_write(uint8_t v);
 void pcf_all_off();
@@ -88,9 +85,11 @@ bool handleSerialCommand(const String& line) {
 // ─────────────────────────────────────────────────────
 void setup() {
     Serial.begin(115200);
+    RadioBridge.begin(BRIDGE_BAUD, SERIAL_8N1, BRIDGE_UART_RX, BRIDGE_UART_TX);
     delay(500);
     bootId = esp_random();
     Serial.println("\n[GATE] booting");
+    Serial.println("[BRIDGE] ESP-12E UART ready");
 
     // I2C bus init (shared by LCD + PCF8574)
     Wire.begin(I2C_SDA, I2C_SCL);
@@ -111,9 +110,6 @@ void setup() {
         Serial.println("[GATE] camera init failed");
         while (1) delay(1000);
     }
-
-    // LoRa
-    initLoRa();
 
     lcd_show("Ready", "Scan QR code");
     Serial.println("[GATE] ready");
@@ -152,8 +148,13 @@ void loop() {
     uint16_t requestSeq = seq++;
     String reply;
     for (uint8_t attempt = 0; attempt < 3 && reply.length() == 0; ++attempt) {
-        sendVerifyRequest(token, payload, requestSeq);
-        reply = waitForReply(REPLY_TIMEOUT_MS);
+        if (!sendVerifyRequest(payload, requestSeq)) {
+            lcd_show("REQ TOO LARGE", "LoRa limit 255 B");
+            delay(1500);
+            lcd_show("Ready", "Scan QR code");
+            return;
+        }
+        reply = waitForBridgeReply(BRIDGE_TIMEOUT_MS);
     }
     if (reply.length() == 0) {
         Serial.println("[GATE] timeout");
@@ -168,22 +169,7 @@ void loop() {
     indicate(granted, reg);
 }
 
-// ── LoRa ─────────────────────────────────────────────
-void initLoRa() {
-    LoRa.setPins(LORA_SS, LORA_RST, LORA_DIO0);
-    if (!LoRa.begin(FREQ_CH1)) {
-        lcd_show("LORA FAIL", "Check wiring");
-        Serial.println("[LORA] init failed");
-        while (1) delay(1000);
-    }
-    LoRa.setSpreadingFactor(12);
-    LoRa.setSignalBandwidth(125E3);
-    LoRa.setCodingRate4(5);
-    LoRa.setTxPower(20);
-    Serial.println("[LORA] ready on 868.1 MHz");
-}
-
-void sendVerifyRequest(const String& token, const String& fullPayload, uint16_t requestSeq) {
+bool sendVerifyRequest(const String& fullPayload, uint16_t requestSeq) {
     JSONVar o;
     o["type"]    = "VERIFY_REQ";
     o["gate"]    = GATE_ID;
@@ -192,27 +178,40 @@ void sendVerifyRequest(const String& token, const String& fullPayload, uint16_t 
     o["seq"]     = requestSeq;
     String body = JSON.stringify(o);
 
-    LoRa.beginPacket();
-    LoRa.print(body);
-    LoRa.endPacket();
-    Serial.printf("[LORA] tx %u bytes\n", body.length());
+    if (!isLoRaPacketSizeValid(body.length())) {
+        Serial.printf("[BRIDGE] request rejected locally: JSON body is %u bytes; LoRa limit is %u bytes\n",
+                      body.length(), static_cast<unsigned int>(LORA_MAX_PACKET_BYTES));
+        return false;
+    }
+
+    RadioBridge.print("REQ:");
+    RadioBridge.println(body);
+    Serial.printf("[BRIDGE] request sent (%u bytes)\n", body.length());
+    return true;
 }
 
-
-
-
-
-String waitForReply(unsigned long timeoutMs) {
+String waitForBridgeReply(unsigned long timeoutMs) {
     unsigned long t0 = millis();
+    String line;
     while (millis() - t0 < timeoutMs) {
-        int sz = LoRa.parsePacket();
-        if (sz) {
-            Serial.printf("[RF] RSSI=%d SNR=%.1f\n",
-                          LoRa.packetRssi(), LoRa.packetSnr());
-            String s = "";
-            while (LoRa.available()) s += (char)LoRa.read();
-            return s;
+        while (RadioBridge.available()) {
+            char c = (char)RadioBridge.read();
+            if (c == '\r') continue;
+            if (c == '\n') {
+                line.trim();
+                if (line.startsWith("ERR:")) {
+                    Serial.printf("[BRIDGE] %s\n", line.c_str());
+                    return "";
+                }
+                if (line.startsWith("RSP:")) return line.substring(4);
+                line = "";
+            } else if (line.length() < 512) {
+                line += c;
+            } else {
+                line = "";
+            }
         }
+        delay(1);
     }
     return "";
 }
