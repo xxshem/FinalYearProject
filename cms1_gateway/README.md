@@ -3,7 +3,9 @@
 ## Role
 Single-radio modem. Listens continuously for gate traffic on CH1 (433.1 MHz)
 and briefly switches to CH2 (433.5 MHz) for explicit sync frames. CH1 uses
-SF12; CH2 uses SF7. The CMS1 listener process exclusively owns USB serial.
+SF12; CH2 also uses SF12. Both channels use 125 kHz bandwidth, coding rate
+4/5, and 20 dBm transmit power. The CMS1 listener process exclusively owns USB
+serial.
 
 ## Pins
 | SX1278 | ESP32 Dev |
@@ -25,7 +27,7 @@ SF12; CH2 uses SF7. The CMS1 listener process exclusively owns USB serial.
     pio device monitor
 
 Expected:
-    [GW1] ready on CH1; CH2 sync uses SF7
+    [GW1] ready on CH1 433.1 MHz; CH2 433.5 MHz, SF12
 
 ## USB Protocol
 Host -> modem : "C1:<payload>\n", "C2:<payload>\n", or "C2W:<payload>\n"

@@ -98,7 +98,7 @@ def main():
                 if isinstance(message, dict):
                     ack = receiver.handle(message)
                     if ack:
-                        ser.write((json.dumps(ack, separators=(",", ":")) + "\n").encode())
+                        ser.write(("C2:" + json.dumps(ack, separators=(",", ":")) + "\n").encode())
                         print(f"[SYNC-RX] {ack['id']} ok={ack['ok']}")
             except json.JSONDecodeError:
                 print(f"[SYNC-RX] ignored malformed frame: {raw[:80]}")

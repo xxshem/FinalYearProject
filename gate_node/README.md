@@ -25,6 +25,11 @@ The ESP32-CAM no longer connects to or controls the LCD, PCF8574 output
 expander, LEDs, or buzzer. This keeps those peripherals away from the camera
 and its pin assignments.
 
+The ESP-12E bridge in `esp8266_lora_bridge/` owns the SX1278 radio. It operates
+on CH1 at 433.1 MHz with SF12, 125 kHz bandwidth, coding rate 4/5, and 20 dBm
+transmit power. The ESP32-CAM in this project communicates with that bridge
+over UART and does not configure the radio.
+
 ## UART protocol
 
 All messages are newline-terminated. Existing verification traffic is

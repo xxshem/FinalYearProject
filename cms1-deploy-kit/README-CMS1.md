@@ -2,10 +2,10 @@
 
 ## Overview
 CMS1 is the master node. It:
-- Receives gate verification traffic over LoRa CH1 (868.1 MHz)
+- Receives gate verification traffic over LoRa CH1 (433.1 MHz)
 - Verifies signed QR payloads against the master SQLite DB
 - Serves a Flask dashboard on port 5000
-- Sends acknowledged database updates to CMS2 over LoRa CH2 (868.5 MHz)
+- Sends acknowledged database updates to CMS2 over LoRa CH2 (433.5 MHz)
 
 CMS1 uses one SX1278 radio. It listens continuously on CH1 and briefly switches
 to CH2 for sync frames; both gateway firmware builds must use the matching

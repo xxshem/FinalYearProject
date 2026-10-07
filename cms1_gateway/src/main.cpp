@@ -1,10 +1,10 @@
 /*
  * CMS1 LoRa Gateway Modem — CH1 listener with explicit CH2 transmissions
- * ESP32 Dev Board + SX1278 (868 MHz)
+ * ESP32 Dev Board + SX1278 (433 MHz)
  *
  * USB protocol:
- *   Host -> modem : "C1:<payload>\n"   (send on CH1, 868.1 MHz)
- *                   "C2:<payload>\n"   (send on CH2, 868.5 MHz)
+ *   Host -> modem : "C1:<payload>\n"   (send on CH1, 433.1 MHz)
+ *                   "C2:<payload>\n"   (send on CH2, 433.5 MHz)
  *   Modem -> host : "C1:<payload>\n"   (received on CH1)
  *                   "C2:<payload>\n"   (received on CH2)
  *
@@ -27,7 +27,7 @@ int      currentCh = 1;
 void applyChannel(int ch) {
     LoRa.idle();
     LoRa.setFrequency(ch == 1 ? FREQ_CH1 : FREQ_CH2);
-    LoRa.setSpreadingFactor(ch == 1 ? 12 : 7);
+    LoRa.setSpreadingFactor(12);
     LoRa.setSignalBandwidth(125E3);
     LoRa.setCodingRate4(5);
     currentCh = ch;
@@ -47,10 +47,7 @@ void setup() {
     LoRa.setSignalBandwidth(125E3);
     LoRa.setCodingRate4(5);
     LoRa.setTxPower(20);
-    LoRa.setSpreadingFactor(12);
-    LoRa.setSignalBandwidth(125E3);
-    LoRa.setCodingRate4(5);
-    Serial.println("[GW1] ready on CH1; CH2 sync uses SF7");
+    Serial.println("[GW1] ready on CH1 433.1 MHz; CH2 433.5 MHz, SF12");
 }
 
 void switchTo(int ch) {

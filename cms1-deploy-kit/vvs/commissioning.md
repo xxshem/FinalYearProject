@@ -123,7 +123,7 @@ Step 2.1 — Open serial monitor on gate node
 
     [GATE] booting
     [QR] camera ready (ESP32QRCodeReader)
-    [LORA] ready on 868.1 MHz
+    [LORA] ready on 433.1 MHz
     [GATE] ready
 
 [ ] Boot banner confirmed

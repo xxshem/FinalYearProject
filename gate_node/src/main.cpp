@@ -19,7 +19,8 @@ String GATE_ID = "GATE_A";        // runtime-changeable default
 #define DEVICE_ID 0x01
 uint32_t bootId = 0;
 
-// UART2 link to the ESP-12E LoRa bridge. Leave the microSD slot unused.
+// UART2 link to the ESP-12E LoRa bridge (CH1, 433.1 MHz). Leave the microSD
+// slot unused; this ESP32-CAM does not configure the radio.
 #define BRIDGE_UART_RX  13
 #define BRIDGE_UART_TX  14
 #define BRIDGE_BAUD     115200
