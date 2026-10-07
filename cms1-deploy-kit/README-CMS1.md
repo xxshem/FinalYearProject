@@ -46,6 +46,26 @@ scheduled sync transmissions.
 ### 6. Open dashboard
 From any browser: http://<CMS1-IP>:5000
 
+### Register a vehicle and generate its QR code
+
+Enter vehicle information in the dashboard; you do not need to create the QR
+code or its signing data yourself:
+
+1. Open **Vehicles** and select **Register Vehicle**.
+2. Enter the owner's name and vehicle registration number, choose the vehicle
+   type, and set how many days the registration is valid.
+3. Select **Register & Generate QR**. The dashboard saves the vehicle in the
+   CMS1 database and opens its QR image.
+4. Save or print the image and give it to the vehicle owner to present when
+   scanned at a gate. Later, find the vehicle on the **Vehicles** page and use
+   its **QR** action to display the image again.
+
+The system creates the vehicle's internal QR identifier and token, then signs
+them with the CMS1 signing key. The QR contains this signed verification
+payload, not the owner's name or registration number. Keep `~/vvs.env` (which
+contains the signing key) secure; changing that key means existing QR codes
+must be regenerated.
+
 ## After Adding LoRa Hardware
 
 When the updated CMS1 ESP32+SX1278 gateway is plugged into the Pi:
@@ -82,7 +102,12 @@ CMS2 receives the database mirror only; its dashboard is not installed by this
 client setup. To use another Linux account, replace `pi` in the service name
 with that account name.
 
-## Add Test Data
+## Add Test Data (Optional)
+
+For command-line demos or test records, use the helper below instead of the
+dashboard form. It adds vehicle records to the same database, but does not
+display or save QR images. To get a QR for one of these records, open
+**Vehicles** in the dashboard and select that vehicle's **QR** action.
 
     cd ~/vvs/scripts
     python3 add_test_data.py vehicle "Alice Wanjiku" "KDA 111A" car
