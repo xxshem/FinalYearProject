@@ -1,23 +1,16 @@
 /*
- * VVS Gate Node — ESP32-CAM + ESP-12E LoRa bridge + I2C LCD + PCF8574
+ * VVS Gate Node — ESP32-CAM + ESP-12E LoRa bridge
  *
  * Verification flow:
  *   1. Capture QR code
  *   2. Extract token
  *   3. Send over UART to the LoRa bridge
  *   4. Wait for reply
- *   5. Feedback: LCD text + green/red LED + buzzer
- *
- * PCF8574 output mapping:
- *   P0 = Green LED  (LOW = on)
- *   P1 = Red LED    (LOW = on)
- *   P2 = Buzzer     (LOW = on)
+ *   5. Send display and feedback events to the ESP-12E
  */
 
 #include <Arduino.h>
 #include <Arduino_JSON.h>
-#include <Wire.h>
-#include <LiquidCrystal_I2C.h>
 #include "qr_decoder.h"
 #include "lora_packet_limits.h"
 
@@ -32,31 +25,24 @@ uint32_t bootId = 0;
 #define BRIDGE_BAUD     115200
 #define BRIDGE_TIMEOUT_MS 20000  // SF12 transmit airtime plus the radio reply timeout
 
-// I2C bus (shared by LCD and PCF8574); see README boot/flash LED precautions.
-#define I2C_SDA    2
-#define I2C_SCL    4
-
-// I2C device addresses — update from i2c_scan results
-#define LCD_ADDR   0x27
-#define PCF_ADDR   0x20
-
-// PCF8574 bit positions
-#define PCF_LED_GREEN  0
-#define PCF_LED_RED    1
-#define PCF_BUZZER     2
-
-LiquidCrystal_I2C lcd(LCD_ADDR, 16, 2);
 HardwareSerial RadioBridge(2);
 uint16_t seq = 0;
 
 // ── Forward declarations ─────────────────────────────
 bool sendVerifyRequest(const String& fullPayload, uint16_t requestSeq);
 String waitForBridgeReply(unsigned long timeoutMs);
-void indicate(bool granted, const String& reg);
-void pcf_write(uint8_t v);
-void pcf_all_off();
-void lcd_show(const char* line1, const char* line2);
-void beep(uint16_t duration_ms);
+void sendStatus(const char* status, const String& detail = String());
+
+String cleanStatusDetail(const String& value) {
+    String clean;
+    clean.reserve(value.length());
+    for (size_t i = 0; i < value.length(); ++i) {
+        const char c = value[i];
+        clean += (c == '\r' || c == '\n') ? ' ' : c;
+    }
+    return clean;
+}
+
 bool handleSerialCommand(const String& line) {
     if (line.startsWith("SET_GATE=")) {
         String newId = line.substring(9);
@@ -64,17 +50,17 @@ bool handleSerialCommand(const String& line) {
         if (newId.length() > 0) {
             GATE_ID = newId;
             Serial.printf("[GATE] GATE_ID now = %s\n", GATE_ID.c_str());
-            lcd_show("Gate ID set", GATE_ID.c_str());
+            sendStatus("GATE_ID_SET", GATE_ID);
             delay(1500);
-            lcd_show("Ready", "Scan QR code");
+            sendStatus("READY");
             return true;
         }
     }
     if (line == "WHOAMI") {
         Serial.printf("[GATE] current GATE_ID = %s\n", GATE_ID.c_str());
-        lcd_show("Gate ID", GATE_ID.c_str());
+        sendStatus("GATE_ID", GATE_ID);
         delay(1500);
-        lcd_show("Ready", "Scan QR code");
+        sendStatus("READY");
         return true;
     }
     return false; 
@@ -91,27 +77,17 @@ void setup() {
     Serial.println("\n[GATE] booting");
     Serial.println("[BRIDGE] ESP-12E UART ready");
 
-    // I2C bus init (shared by LCD + PCF8574)
-    Wire.begin(I2C_SDA, I2C_SCL);
-    Wire.setClock(100000);
-
-    // LCD
-    lcd.init();
-    lcd.backlight();
-    lcd_show("VVS GATE NODE", "Initializing...");
-
-    // PCF8574: all HIGH = LEDs off, buzzer off
-    pcf_all_off();
-    delay(10);
+    sendStatus("INITIALIZING");
 
     // Camera
     if (!qr_camera_init()) {
-        lcd_show("CAMERA FAIL", "Check ribbon");
+        sendStatus("CAMERA_ERROR");
         Serial.println("[GATE] camera init failed");
         while (1) delay(1000);
     }
 
-    lcd_show("Ready", "Scan QR code");
+    sendStatus("CAMERA_READY");
+    sendStatus("READY");
     Serial.println("[GATE] ready");
 }
 
@@ -143,22 +119,22 @@ void loop() {
     int p2 = payload.indexOf('|', p1 + 1);
     String token = (p1 > 0 && p2 > p1) ? payload.substring(p1 + 1, p2) : payload;
     Serial.printf("[GATE] token: %s\n", token.c_str());
-    lcd_show("Checking...", token.c_str());
+    sendStatus("CHECKING", token);
 
     uint16_t requestSeq = seq++;
     String reply;
     for (uint8_t attempt = 0; attempt < 3 && reply.length() == 0; ++attempt) {
         if (!sendVerifyRequest(payload, requestSeq)) {
-            lcd_show("REQ TOO LARGE", "LoRa limit 255 B");
+            sendStatus("REQUEST_TOO_LARGE");
             delay(1500);
-            lcd_show("Ready", "Scan QR code");
+            sendStatus("READY");
             return;
         }
         reply = waitForBridgeReply(BRIDGE_TIMEOUT_MS);
     }
     if (reply.length() == 0) {
         Serial.println("[GATE] timeout");
-        indicate(false, "Timeout");
+        sendStatus("REJECTED", "Timeout");
         return;
     }
 
@@ -166,7 +142,17 @@ void loop() {
     bool granted = (bool)obj["granted"];
     String reg   = (const char*)obj["reg"];
     Serial.printf("[GATE] reply: %s\n", reply.c_str());
-    indicate(granted, reg);
+    sendStatus(granted ? "VERIFIED" : "REJECTED", reg);
+}
+
+void sendStatus(const char* status, const String& detail) {
+    RadioBridge.print("STATUS:");
+    RadioBridge.print(status);
+    if (detail.length() > 0) {
+        RadioBridge.print(':');
+        RadioBridge.print(cleanStatusDetail(detail));
+    }
+    RadioBridge.println();
 }
 
 bool sendVerifyRequest(const String& fullPayload, uint16_t requestSeq) {
@@ -193,79 +179,29 @@ bool sendVerifyRequest(const String& fullPayload, uint16_t requestSeq) {
 String waitForBridgeReply(unsigned long timeoutMs) {
     unsigned long t0 = millis();
     String line;
+    bool lineTooLong = false;
     while (millis() - t0 < timeoutMs) {
         while (RadioBridge.available()) {
             char c = (char)RadioBridge.read();
             if (c == '\r') continue;
             if (c == '\n') {
-                line.trim();
-                if (line.startsWith("ERR:")) {
-                    Serial.printf("[BRIDGE] %s\n", line.c_str());
-                    return "";
+                if (!lineTooLong) {
+                    line.trim();
+                    if (line.startsWith("ERR:")) {
+                        Serial.printf("[BRIDGE] %s\n", line.c_str());
+                        return "";
+                    }
+                    if (line.startsWith("RSP:")) return line.substring(4);
                 }
-                if (line.startsWith("RSP:")) return line.substring(4);
                 line = "";
-            } else if (line.length() < 512) {
+                lineTooLong = false;
+            } else if (!lineTooLong && line.length() < 512) {
                 line += c;
             } else {
-                line = "";
+                lineTooLong = true;
             }
         }
         delay(1);
     }
     return "";
-}
-
-// ── Feedback: LCD + LED + buzzer ─────────────────────
-void indicate(bool granted, const String& reg) {
-    pcf_all_off();  // reset
-
-    if (granted) {
-        // Green LED on
-        pcf_write(0xFF & ~(1 << PCF_LED_GREEN));
-        lcd_show("ACCESS GRANTED", reg.length() ? reg.c_str() : "");
-        beep(200);
-        delay(1500);
-    } else {
-        // Red LED on
-        pcf_write(0xFF & ~(1 << PCF_LED_RED));
-        lcd_show("ACCESS DENIED", reg.length() ? reg.c_str() : "");
-        beep(500);
-        delay(200);
-        beep(500);
-        delay(800);
-    }
-
-    pcf_all_off();
-    lcd_show("Ready", "Scan QR code");
-}
-
-// ── Low-level helpers ────────────────────────────────
-void pcf_write(uint8_t v) {
-    Wire.beginTransmission(PCF_ADDR);
-    Wire.write(v);
-    Wire.endTransmission();
-}
-
-void pcf_all_off() {
-    pcf_write(0xFF);   // all PCF pins HIGH → LEDs off, buzzer off
-}
-
-void lcd_show(const char* line1, const char* line2) {
-    lcd.clear();
-    lcd.setCursor(0, 0);
-    lcd.print(line1);
-    if (line2 && strlen(line2)) {
-        lcd.setCursor(0, 1);
-        char buf[17];
-        strncpy(buf, line2, 16);
-        buf[16] = 0;
-        lcd.print(buf);
-    }
-}
-
-void beep(uint16_t duration_ms) {
-    pcf_write(0xFF & ~(1 << PCF_BUZZER));
-    delay(duration_ms);
-    pcf_all_off();
 }
