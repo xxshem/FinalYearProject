@@ -5,12 +5,11 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=pi
-Group=pi
-WorkingDirectory=/home/pi/vvs/dashboard
+User=@VVS_USER@
+WorkingDirectory=@VVS_HOME@/vvs/dashboard
 Environment=PYTHONUNBUFFERED=1
-EnvironmentFile=-/home/pi/vvs.env
-ExecStart=/home/pi/vvs-venv/bin/python3 /home/pi/vvs/dashboard/app.py
+EnvironmentFile=-@VVS_HOME@/vvs.env
+ExecStart=@VVS_HOME@/vvs-venv/bin/python3 @VVS_HOME@/vvs/dashboard/app.py
 Restart=always
 RestartSec=5
 

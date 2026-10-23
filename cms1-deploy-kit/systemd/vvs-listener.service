@@ -5,13 +5,12 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=pi
-Group=pi
+User=@VVS_USER@
 ExecStartPre=/bin/sleep 5
-WorkingDirectory=/home/pi/vvs/lora
+WorkingDirectory=@VVS_HOME@/vvs/lora
 Environment=PYTHONUNBUFFERED=1
-EnvironmentFile=-/home/pi/vvs.env
-ExecStart=/home/pi/vvs-venv/bin/python3 /home/pi/vvs/lora/gate_listener.py
+EnvironmentFile=-@VVS_HOME@/vvs.env
+ExecStart=@VVS_HOME@/vvs-venv/bin/python3 @VVS_HOME@/vvs/lora/gate_listener.py
 Restart=always
 RestartSec=10
 

@@ -20,18 +20,24 @@ the gateway serial port.
 ## Deploy (10 minutes)
 
 ### 1. Copy kit to the Pi
-From your dev PC:
-    ssh pi@<CMS1-IP> "mkdir -p ~/cms1-deploy-kit ~/vvs"
-    scp cms1-deploy-kit/install.sh cms1-deploy-kit/requirements.txt pi@<CMS1-IP>:~/cms1-deploy-kit/
-    scp -r cms1-deploy-kit/systemd pi@<CMS1-IP>:~/cms1-deploy-kit/
-    scp -r cms1-deploy-kit/vvs pi@<CMS1-IP>:~/
+From your dev PC, replace `<PI-USER>` with the Linux username you created:
+    ssh <PI-USER>@<CMS1-IP> "mkdir -p ~/cms1-deploy-kit ~/vvs"
+    scp cms1-deploy-kit/install.sh cms1-deploy-kit/requirements.txt <PI-USER>@<CMS1-IP>:~/cms1-deploy-kit/
+    scp -r cms1-deploy-kit/systemd <PI-USER>@<CMS1-IP>:~/cms1-deploy-kit/
+    scp -r cms1-deploy-kit/vvs <PI-USER>@<CMS1-IP>:~/
 
 ### 2. SSH in
-    ssh pi@<CMS1-IP>
+    ssh <PI-USER>@<CMS1-IP>
 
 ### 3. Run installer
     chmod +x ~/cms1-deploy-kit/install.sh
     ~/cms1-deploy-kit/install.sh
+
+The installer configures both services for the account running it, so the
+default Raspberry Pi OS username `pi` is not required.
+If you cloned the project instead of copying the kit into `~/cms1-deploy-kit`,
+run `~/FinalYearProject/cms1-deploy-kit/install.sh`; the installer locates its
+requirements and service files beside itself.
 
 ### 4. Reboot
     sudo reboot
