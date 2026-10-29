@@ -230,6 +230,7 @@ void setup() {
     lcdShow("VVS GATE NODE", "Initializing...");
 
     LoRa.setPins(LORA_NSS, LORA_RESET, LORA_DIO0);
+    LoRa.setSPIFrequency(4E6);
     if (!LoRa.begin(RADIO_FREQ)) {
         lcdShow("RADIO FAIL", "Check SX1278");
         return;
