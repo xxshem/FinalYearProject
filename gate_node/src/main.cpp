@@ -24,7 +24,7 @@ uint32_t bootId = 0;
 #define BRIDGE_UART_RX  13
 #define BRIDGE_UART_TX  14
 #define BRIDGE_BAUD     115200
-#define BRIDGE_TIMEOUT_MS 20000  // SF12 transmit airtime plus the radio reply timeout
+#define BRIDGE_TIMEOUT_MS 10000  // Per-attempt timeout; up to three attempts are made
 
 HardwareSerial RadioBridge(2);
 uint16_t seq = 0;

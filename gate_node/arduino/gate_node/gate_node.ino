@@ -21,7 +21,7 @@ uint16_t seq = 0;
 constexpr int BRIDGE_UART_RX = 13;
 constexpr int BRIDGE_UART_TX = 14;
 constexpr uint32_t BRIDGE_BAUD = 115200;
-constexpr unsigned long BRIDGE_TIMEOUT_MS = 20000;
+constexpr unsigned long BRIDGE_TIMEOUT_MS = 10000;
 
 HardwareSerial RadioBridge(2);
 ESP32QRCodeReader qrReader(CAMERA_MODEL_AI_THINKER);
