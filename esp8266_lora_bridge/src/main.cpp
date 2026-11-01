@@ -211,6 +211,14 @@ void handleRequest(const String& line) {
 }
 
 void finishUartLine() {
+    if (uartLine.startsWith("REQ:")) {
+        Serial.print("[UART RX first 16]");
+        for (size_t i = 0; i < uartLine.length() && i < 16; ++i) {
+            Serial.printf(" %02X", static_cast<uint8_t>(uartLine[i]));
+        }
+        Serial.println();
+    }
+
     if (uartLineTooLong) {
         sendBridgeError("FRAME_TOO_LONG");
     } else if (uartLine.length() > 0) {
