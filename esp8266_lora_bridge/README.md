@@ -17,8 +17,8 @@ LoRa reply behavior are unchanged.
 | SX1278 NSS / CS | D1 | GPIO 5 | Explicitly assigned in firmware |
 | SX1278 RESET | D0 | GPIO 16 | Explicitly assigned in firmware |
 | SX1278 DIO0 | D2 | GPIO 4 | Explicitly assigned in firmware |
-| ESP32-CAM UART TX → NodeMCU RX | RX | GPIO 3 | UART0, 115200 baud |
-| NodeMCU UART TX → ESP32-CAM RX | TX | GPIO 1 | UART0, 115200 baud |
+| ESP32-CAM UART TX → NodeMCU RX | RX | GPIO 3 | UART0, 115200 baud, 8-N-1 |
+| NodeMCU UART TX → ESP32-CAM RX | TX | GPIO 1 | UART0, 115200 baud, 8-N-1 |
 
 **Pin-conflict decision:** the initial D1/D2 I²C proposal conflicts with the
 existing SX1278 NSS and DIO0 assignments. The firmware keeps the established

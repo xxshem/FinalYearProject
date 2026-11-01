@@ -12,6 +12,7 @@
 #define LCD_ADDR        0x27
 #define OUTPUTS_ADDR    0x20
 #define RADIO_FREQ    433.1E6
+#define UART_BAUD      115200
 #define RADIO_TIMEOUT_MS 6000
 #define UART_FRAME_TIMEOUT_MS 1000
 #define MAX_UART_LINE  512
@@ -220,7 +221,7 @@ void finishUartLine() {
 }
 
 void setup() {
-    Serial.begin(115200);
+    Serial.begin(UART_BAUD, SERIAL_8N1);
 
     Wire.begin(I2C_SDA, I2C_SCL);
     Wire.setClock(100000);
