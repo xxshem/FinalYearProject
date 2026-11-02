@@ -20,7 +20,7 @@ uint16_t seq = 0;
 // microSD slot; GPIO 13 and 14 are shared with that interface.
 constexpr int BRIDGE_UART_RX = 13;
 constexpr int BRIDGE_UART_TX = 14;
-constexpr uint32_t BRIDGE_BAUD = 115200;
+constexpr uint32_t BRIDGE_BAUD = 9600;
 constexpr unsigned long BRIDGE_TIMEOUT_MS = 10000;
 
 HardwareSerial RadioBridge(2);
