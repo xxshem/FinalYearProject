@@ -145,6 +145,13 @@ def verify_and_authorize(payload, gate_id, request_id=None, radio_metrics=None):
             REQUEST_CACHE.popitem(last=False)
     return response
 
+def attach_request_identity(response, request):
+    correlated_response = dict(response)
+    for key in ("boot", "seq"):
+        if key in request:
+            correlated_response[key] = request[key]
+    return correlated_response
+
 def read_tagged(ser):
     raw = ser.readline().decode("utf-8", errors="ignore").strip()
     if not raw: return None, None, None
@@ -188,6 +195,7 @@ def main():
                       request_started = time.perf_counter()
                       resp = verify_and_authorize(
                         pkt.get("payload", ""), gate_id, request_id, radio_metrics)
+                      resp = attach_request_identity(resp, pkt)
                       ser.write(("C1:" + json.dumps(resp) + "\n").encode())
                       metrics = radio_metrics or {}
                       print(f"[METRICS] {gate_id} RSSI={metrics.get('rssi_dbm', 'n/a')} dBm "

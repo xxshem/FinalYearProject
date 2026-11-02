@@ -12,7 +12,7 @@
 #define LCD_ADDR        0x27
 #define OUTPUTS_ADDR    0x20
 #define RADIO_FREQ    433.1E6
-#define UART_BAUD      115200
+#define UART_BAUD      9600
 #define RADIO_TIMEOUT_MS 6000
 #define UART_FRAME_TIMEOUT_MS 1000
 #define MAX_UART_LINE  512
@@ -43,6 +43,30 @@ unsigned long lastUartByteAt = 0;
 void sendBridgeError(const char* error) {
     Serial.print("ERR:");
     Serial.println(error);
+}
+
+void sendRequestError(uint32_t boot, uint16_t seq, const char* error) {
+    Serial.print("ERR:");
+    Serial.print(boot);
+    Serial.print(':');
+    Serial.print(seq);
+    Serial.print(':');
+    Serial.println(error);
+}
+
+bool parseUnsignedDecimal(const String& value, uint32_t maximum, uint32_t& result) {
+    if (value.length() == 0) return false;
+
+    uint32_t parsed = 0;
+    for (size_t i = 0; i < value.length(); ++i) {
+        const char c = value[i];
+        if (c < '0' || c > '9') return false;
+        const uint8_t digit = static_cast<uint8_t>(c - '0');
+        if (parsed > (maximum - digit) / 10) return false;
+        parsed = parsed * 10 + digit;
+    }
+    result = parsed;
+    return true;
 }
 
 void pcfWrite(uint8_t value) {
@@ -154,6 +178,9 @@ bool handleStatus(const String& line) {
         lcdShow("Checking...", detail);
     } else if (status == "REQUEST_TOO_LARGE") {
         lcdShow("REQ TOO LARGE", "LoRa limit 255 B");
+    } else if (status == "BRIDGE_ERROR") {
+        allOutputsOff();
+        lcdShow("BRIDGE ERROR", detail);
     } else if (status == "VERIFIED") {
         startResultFeedback(true, detail);
     } else if (status == "REJECTED") {
@@ -165,23 +192,39 @@ bool handleStatus(const String& line) {
 }
 
 void handleRequest(const String& line) {
+    if (line.startsWith("STATUS:")) {
+        if (!handleStatus(line)) sendBridgeError("BAD_STATUS");
+        return;
+    }
     if (!line.startsWith("REQ:")) {
-        if (line.startsWith("STATUS:")) {
-            if (radioReady && !handleStatus(line)) sendBridgeError("BAD_STATUS");
-        } else {
-            sendBridgeError("BAD_COMMAND");
-        }
+        sendBridgeError("BAD_COMMAND");
+        return;
+    }
+
+    const int bootSeparator = line.indexOf(':', 4);
+    const int seqSeparator = bootSeparator < 0
+        ? -1 : line.indexOf(':', bootSeparator + 1);
+    uint32_t requestBoot = 0;
+    uint32_t requestSeq = 0;
+    if (seqSeparator < 0 ||
+        !parseUnsignedDecimal(line.substring(4, bootSeparator), UINT32_MAX,
+                              requestBoot) ||
+        !parseUnsignedDecimal(line.substring(bootSeparator + 1, seqSeparator),
+                              UINT16_MAX, requestSeq)) {
+        sendBridgeError("BAD_REQUEST");
         return;
     }
 
     if (!radioReady) {
-        sendBridgeError("RADIO_INIT_FAILED");
+        sendRequestError(requestBoot, static_cast<uint16_t>(requestSeq),
+                         "RADIO_INIT_FAILED");
         return;
     }
 
-    const String payload = line.substring(4);
+    const String payload = line.substring(seqSeparator + 1);
     if (payload.length() == 0 || payload.length() > MAX_LORA_PACKET) {
-        sendBridgeError("BAD_REQUEST");
+        sendRequestError(requestBoot, static_cast<uint16_t>(requestSeq),
+                         "BAD_REQUEST");
         return;
     }
 
@@ -189,7 +232,7 @@ void handleRequest(const String& line) {
     LoRa.beginPacket();
     LoRa.print(payload);
     if (!LoRa.endPacket()) {
-        sendBridgeError("TX_FAILED");
+        sendRequestError(requestBoot, static_cast<uint16_t>(requestSeq), "TX_FAILED");
         return;
     }
 
@@ -207,7 +250,7 @@ void handleRequest(const String& line) {
         delay(1);
     }
 
-    sendBridgeError("TIMEOUT");
+    sendRequestError(requestBoot, static_cast<uint16_t>(requestSeq), "TIMEOUT");
 }
 
 void finishUartLine() {

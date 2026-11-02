@@ -12,14 +12,18 @@ ESP-12E owns the LCD, indicators, buzzer, and SX1278.
 | Signal | ESP32-CAM connection | Notes |
 |---|---|---|
 | Camera | OV2640 camera connector | AI-Thinker camera pin map managed by `ESP32QRCodeReader` |
-| UART TX to bridge | GPIO 14 (UART2 TX) | Connect to NodeMCU GPIO 3 / RX |
-| UART RX from bridge | GPIO 13 (UART2 RX) | Connect to NodeMCU GPIO 1 / TX |
+| UART TX to bridge | U0T / GPIO 1 (UART0 TX) | Connect to NodeMCU GPIO 3 / RX |
+| UART RX from bridge | U0R / GPIO 3 (UART0 RX) | Connect to NodeMCU GPIO 1 / TX |
 | Ground | GND | Common ground with NodeMCU |
 
-Do not use the microSD slot; GPIO 13/14 are shared with that interface. UART
-is 115200 baud, 8-N-1, with 3.3 V logic. Disconnect the two UART signal wires
-when programming either board because the NodeMCU GPIO 1/3 pins are also its
-USB programming UART.
+The inter-board link uses UART0 at 9600 baud, 8-N-1, with 3.3 V logic. UART0
+is also the ESP32-CAM programming UART. Disconnect both UART signal wires
+between boards while flashing, then reconnect them for runtime. The ESP32-CAM
+USB-to-serial console is unavailable while connected: its U0R input would
+otherwise be driven by both the USB adapter TX and NodeMCU TX. The NodeMCU
+also shares its GPIO 1/3 UART pins with its onboard USB-to-serial interface;
+disconnect NodeMCU USB while the inter-board link is active, or use a switch
+to select the TX source. Never tie active TX outputs together.
 
 The ESP32-CAM no longer connects to or controls the LCD, PCF8574 output
 expander, LEDs, or buzzer. This keeps those peripherals away from the camera
@@ -32,14 +36,25 @@ over UART and does not configure the radio.
 
 ## UART protocol
 
-All messages are newline-terminated. Existing verification traffic is
-unchanged:
+All messages are newline-terminated. The verification payload is unchanged;
+the UART request envelope includes identifiers so retries and replies can be
+correlated:
 
-- ESP32-CAM → NodeMCU: `REQ:<JSON>\n`
+- ESP32-CAM → NodeMCU: `REQ:<boot-id>:<seq>:<JSON>\n`
 - NodeMCU → ESP32-CAM: `RSP:<JSON>\n` or `ERR:<reason>\n`
 
 The JSON request body is still limited to 255 bytes, excluding the `REQ:`
-prefix and newline. The bridge forwards that same JSON body over LoRa.
+envelope and newline. The bridge forwards that same JSON body over LoRa.
+Responses echo the request `boot` and `seq`; replies with another sequence are
+discarded, and pending UART input is drained before the first attempt to
+remove startup noise or an earlier transaction's leftover frame. The gate
+waits up to 20 seconds per attempt and retries at most three times with the
+same identifiers. Request-specific errors use
+`ERR:<boot-id>:<seq>:<reason>\n`; uncorrelated framing/command errors use
+`ERR:<reason>\n`. Retries reuse the same request sequence so the listener can
+return its cached decision instead of processing the scan twice.
+The ESP32-CAM ROM may emit boot text on UART0 at its bootloader baud; that
+startup noise is not application data and is discarded before a scan request.
 
 The ESP32-CAM also sends these local display/feedback events to the NodeMCU:
 
@@ -48,35 +63,35 @@ STATUS:INITIALIZING
 STATUS:CAMERA_READY
 STATUS:CAMERA_ERROR
 STATUS:READY
-STATUS:GATE_ID_SET:<gate-id>
-STATUS:GATE_ID:<gate-id>
 STATUS:CHECKING:<token>
 STATUS:REQUEST_TOO_LARGE
+STATUS:BRIDGE_ERROR:<reason>
 STATUS:VERIFIED:<registration>
 STATUS:REJECTED:<registration>
 ```
 
-For an empty registration, the final colon and detail are omitted. A timeout
-uses `STATUS:REJECTED:Timeout`. Status messages do not change the LoRa JSON
-request/reply application protocol.
+For an empty registration, the final colon and detail are omitted. UART or
+radio failures use `STATUS:BRIDGE_ERROR:<reason>`. Status messages do not
+change the LoRa JSON request/reply application protocol.
+The ESP-12E continues to process status messages even if its LoRa radio fails
+to initialize, allowing its LCD to report camera and gate state.
 
-## Build, upload, monitor
+## Build and upload
 
-From this directory:
+From this directory, with the ESP32-CAM UART link disconnected:
 
 ```text
 pio run
 pio run --target upload
-pio device monitor
 ```
 
-The USB serial monitor remains the ESP32-CAM programming/diagnostics UART.
-Bench testing also accepts a full signed QR payload (`vid|token|signature`)
-typed into the serial monitor. Unsigned token-only input is intentionally
-denied.
-
-To change the gate ID at runtime, send `SET_GATE=<id>` or `WHOAMI` over the
-ESP32-CAM USB serial monitor.
+UART0 is shared by flashing and the 9600-baud bridge protocol. The gate does
+not send diagnostic text or accept serial commands on this port, so it cannot
+be used as a USB console while the bridge is connected. Verification starts
+from the camera QR scanner. The standalone sketch uses the same UART0 application
+link and has the same console limitation.
+The gate ID is set in firmware (`GATE_ID`) and requires a rebuild/reflash to
+change.
 
 ## Arduino IDE
 
@@ -84,8 +99,8 @@ A standalone Arduino IDE sketch is in
 [`arduino/gate_node/gate_node.ino`](arduino/gate_node/gate_node.ino). It combines
 the PlatformIO `main.cpp` and QR decoder implementation and inlines the
 255-byte LoRa packet limit, so it does not need the project `include/` or
-`src/` folders. It retains the QR verification, serial test commands, UART
-bridge protocol, and status messages.
+`src/` folders. It retains the QR verification, UART bridge protocol, and
+status messages.
 
 ### Install the ESP32 board package and libraries
 
@@ -117,6 +132,7 @@ Open `arduino/gate_node/gate_node.ino` in Arduino IDE. Select:
 | Flash Mode | **QIO** |
 | Partition Scheme | **Huge APP (3MB No OTA/1MB SPIFFS)** |
 | PSRAM | **Enabled** |
+| Core Debug Level | **None** |
 | Port | The serial/COM port for the FTDI adapter |
 
 Menu wording can vary slightly with the installed Espressif ESP32 board-package
@@ -125,15 +141,18 @@ version. The camera QR decoder requires working PSRAM.
 The PlatformIO-specific differences are already handled in the sketch:
 `main.cpp` and `qr_decoder.cpp` are combined into one `.ino`, the local QR
 decoder header is no longer needed, and `lora_packet_limits.h` is replaced by
-the same 255-byte limit and a small validation function. `Arduino_JSON` and
-`ESP32QRCodeReader` remain required libraries.
+the same 255-byte limit and a small validation function. Both variants use
+UART0 at 9600 baud for the bridge, check camera setup, and share the same
+request/reply behavior. `Arduino_JSON` and `ESP32QRCodeReader` remain required
+libraries.
 
-### FTDI wiring and upload
+### USB-to-serial wiring and upload
 
-Use a USB-to-TTL adapter with **3.3V UART logic**. The ESP32-CAM may be powered
-through its **5V** pin with a stable supply capable of at least 500 mA (1 A is
-recommended). Many FTDI adapters cannot supply enough current from their 3.3V
-output; do not use that output to power the camera board.
+Use a USB-to-TTL adapter with **3.3V UART logic**. Disconnect both bridge UART
+signal wires before attaching the programming adapter. The ESP32-CAM may be
+powered through its **5V** pin with a stable supply capable of at least 500 mA
+(1 A is recommended). Many FTDI adapters cannot supply enough current from
+their 3.3V output; do not use that output to power the camera board.
 
 | FTDI adapter | AI-Thinker ESP32-CAM |
 |---|---|
@@ -147,8 +166,8 @@ Keep FTDI TX/RX at 3.3V logic even when powering the board from 5V. Do not
 connect the FTDI's 5V logic output to ESP32 pins. Avoid powering the board
 simultaneously from two 5V sources.
 
-1. Disconnect the bridge/peripherals from the ESP32-CAM and check that FTDI TX
-   and RX are crossed as shown above, with a shared ground.
+1. Disconnect the ESP-12E bridge UART wires from GPIO 1 and GPIO 3. Connect the
+   programming adapter TX/RX as shown above, crossed, with a shared ground.
 2. Connect GPIO 0 to GND.
 3. Apply power or pulse the ESP32-CAM **RESET** button. Keep GPIO 0 grounded
    while the board enters its bootloader.
@@ -157,33 +176,34 @@ simultaneously from two 5V sources.
    press and release **RESET** once.
 5. When upload completes, disconnect GPIO 0 from GND and press **RESET** (or
    power-cycle) to run the sketch.
-6. Open Serial Monitor at **115200 baud**. The bridge UART uses GPIO 13 (RX)
-   and GPIO 14 (TX), at 115200 baud, and shares pins with the unused microSD
-   interface.
+6. Disconnect the programming adapter, reconnect ESP32-CAM GPIO 1/3 to the
+   bridge, and reset the board. The inter-board protocol then runs on UART0 at
+   9600 baud; do not open a serial monitor while the bridge is connected.
 
-### If upload still reports “Failed to connect to ESP32: No serial data received”
+### Upload troubleshooting
 
-That message occurs before the firmware runs, so changing the sketch usually
-does not fix it. Check these items:
+PlatformIO is configured not to pulse reset before or after flashing because
+this ESP32-CAM setup uses manual bootloader entry. If upload reports
+“Failed to connect to ESP32: No serial data received”, check these items:
 
-- **Bootloader mode:** GPIO 0 must be LOW when the ESP32-CAM resets. Verify the
-  GPIO 0-to-GND jumper and press RESET after starting the upload.
+- **Bootloader mode:** hold GPIO 0 to GND, reset the ESP32-CAM, and start the
+  upload. Release GPIO 0 after flashing and reset once more to run the firmware.
+  The no-reset upload settings do not automate this step.
 - **Power:** use a stable 5V supply to the board's 5V pin and a common ground.
-  A weak FTDI 3.3V/5V output, long thin leads, or a brownout can prevent the
-  bootloader from responding.
-- **UART wiring:** FTDI TXD goes to U0R/GPIO 3; FTDI RXD goes to U0T/GPIO 1.
-  Confirm the adapter uses 3.3V UART levels.
+  Keep UART signals at 3.3V logic; do not power the camera from an under-rated
+  adapter output.
+- **Bridge wiring:** disconnect the ESP-12E bridge UART while flashing. It is
+  connected to the same ESP32-CAM UART0 pins (GPIO 1/3) used for flashing.
 - **Port/driver:** select the port that appears when the adapter is connected,
-  install its USB-serial driver if needed, and close other serial monitors or
-  applications using that port.
-- **Reset/strapping pins:** try a shorter cable, another USB port, and manual
-  RESET timing. Disconnect attached circuitry that may drive GPIO 0, GPIO 1,
-  GPIO 3, or GPIO 12 during startup.
-- **Upload speed:** keep 115200 baud until upload works reliably; try 57600
-  only if the connection is marginal.
+  install its USB-serial driver if needed, and close other applications using
+  that port.
+- **Strapping pins:** disconnect circuitry that may hold GPIO 0, 2, 5, 12, or
+  15 at the wrong level during reset. GPIO 1/3 are used by UART0 and must be
+  connected to the programming adapter only while flashing.
+- **Upload speed:** use the configured 115200 baud.
 - **Board/flash settings:** verify AI Thinker ESP32-CAM, QIO flash mode, and
   PSRAM enabled. These settings matter for runtime/firmware layout; they do
-  not replace the GPIO 0 bootloader procedure.
+  not replace manual GPIO 0 bootloader entry.
 
 After a successful flash, remove the GPIO 0 jumper before resetting or the
 board will return to download mode instead of running the firmware.

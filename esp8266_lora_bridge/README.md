@@ -17,8 +17,8 @@ LoRa reply behavior are unchanged.
 | SX1278 NSS / CS | D1 | GPIO 5 | Explicitly assigned in firmware |
 | SX1278 RESET | D0 | GPIO 16 | Explicitly assigned in firmware |
 | SX1278 DIO0 | D2 | GPIO 4 | Explicitly assigned in firmware |
-| ESP32-CAM UART TX → NodeMCU RX | RX | GPIO 3 | UART0, 115200 baud, 8-N-1 |
-| NodeMCU UART TX → ESP32-CAM RX | TX | GPIO 1 | UART0, 115200 baud, 8-N-1 |
+| ESP32-CAM UART TX → NodeMCU RX | RX | GPIO 3 | UART0, 9600 baud, 8-N-1 |
+| NodeMCU UART TX → ESP32-CAM RX | TX | GPIO 1 | UART0, 9600 baud, 8-N-1 |
 
 **Pin-conflict decision:** the initial D1/D2 I²C proposal conflicts with the
 existing SX1278 NSS and DIO0 assignments. The firmware keeps the established
@@ -29,7 +29,13 @@ If either line can be held low during reset, add suitable 3.3 V pull-ups or
 choose a different validated wiring arrangement before powering the board.
 
 GPIO 1/3 are also used for USB programming. Disconnect the inter-board UART
-signals while uploading firmware. Connect grounds and use 3.3 V UART logic.
+signals while uploading either board's firmware. During normal operation,
+GPIO 3 / RX is driven by the ESP32-CAM TX and by the NodeMCU's onboard
+USB-to-serial TX output if USB is attached. Disconnect NodeMCU USB while the
+inter-board link is active, or use a switch/multiplexer to select the TX
+source; do not tie active TX outputs together. The ESP32-CAM also uses UART0
+for this link, so its programming adapter must be disconnected during
+operation. Connect grounds and use 3.3 V UART logic.
 The former optional UART1 diagnostics on GPIO 2 are no longer available there,
 because GPIO 2 is now the I²C clock pin.
 
@@ -77,25 +83,31 @@ or use proper level shifting; ESP8266 GPIOs are not 5 V tolerant.
 
 | ESP32-CAM | NodeMCU |
 |---|---|
-| GPIO 14 / UART2 TX | RX / GPIO 3 |
-| GPIO 13 / UART2 RX | TX / GPIO 1 |
+| U0T / GPIO 1 (UART0 TX) | RX / GPIO 3 |
+| U0R / GPIO 3 (UART0 RX) | TX / GPIO 1 |
 | GND | GND |
 
-The microSD interface on the ESP32-CAM must remain unused because its GPIO
-13/14 pins are assigned to UART.
+The bridge protocol and firmware upload share ESP32-CAM UART0. Disconnect both
+inter-board signal wires while flashing, and do not attach a serial monitor
+while the ESP32-CAM and bridge are connected.
 
 ## UART protocol
 
-Messages are newline-delimited at 115200 baud. The established verification
+Messages are newline-delimited at 9600 baud. The established verification
 protocol remains:
 
-- ESP32-CAM → NodeMCU: `REQ:<JSON>\n`
+- ESP32-CAM → NodeMCU: `REQ:<boot-id>:<seq>:<JSON>\n`
 - NodeMCU → ESP32-CAM: `RSP:<JSON>\n` or `ERR:<reason>\n`
 
-The bridge forwards the JSON body (without the UART prefix) over LoRa, then
-returns the LoRa reply unchanged in an `RSP:` frame. It reports radio/request
-errors using the existing `ERR:` format, including `BAD_REQUEST`,
-`RADIO_INIT_FAILED`, `TX_FAILED`, and `TIMEOUT`.
+The bridge forwards only the JSON body over LoRa, then returns the LoRa reply
+unchanged in an `RSP:` frame. The response JSON echoes the request `boot` and
+`seq` so the gate can discard stale or duplicate replies. Request-specific
+errors use `ERR:<boot-id>:<seq>:<reason>\n` and include `BAD_REQUEST`,
+`RADIO_INIT_FAILED`, `TX_FAILED`, and `TIMEOUT`. Errors unrelated to a
+correlatable request, such as malformed UART frames, retain the
+`ERR:<reason>\n` form. The gate drains pending UART input before starting a
+transaction and ignores replies/errors that do not match its current request
+identifiers.
 
 The ESP32-CAM sends local UI events using `STATUS:<name>[:<detail>]\n`:
 
@@ -104,10 +116,9 @@ STATUS:INITIALIZING
 STATUS:CAMERA_READY
 STATUS:CAMERA_ERROR
 STATUS:READY
-STATUS:GATE_ID_SET:<gate-id>
-STATUS:GATE_ID:<gate-id>
 STATUS:CHECKING:<token>
 STATUS:REQUEST_TOO_LARGE
+STATUS:BRIDGE_ERROR:<reason>
 STATUS:VERIFIED:<registration>
 STATUS:REJECTED:<registration>
 ```
@@ -115,7 +126,8 @@ STATUS:REJECTED:<registration>
 The bridge accepts partial UART frames, discards overlong frames, and resets
 stalled partial frames after one second (`ERR:FRAME_TOO_LONG` or
 `ERR:FRAME_TIMEOUT`). Malformed status/command frames receive `ERR:BAD_STATUS`
-or `ERR:BAD_COMMAND`.
+or `ERR:BAD_COMMAND`. Display/status messages are still processed if LoRa
+initialization fails, so camera and gate state remain visible on the LCD.
 
 ## LoRa settings
 

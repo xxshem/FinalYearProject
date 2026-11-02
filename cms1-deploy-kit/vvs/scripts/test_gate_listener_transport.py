@@ -36,6 +36,16 @@ class SerialLine:
 
 
 class GateListenerTransportTests(unittest.TestCase):
+    def test_response_echoes_request_identity(self):
+        response = {"type": "VERIFY_RESP", "granted": True}
+        request = {"boot": 1234, "seq": 7}
+
+        correlated = gate_listener.attach_request_identity(response, request)
+
+        self.assertEqual(correlated["boot"], 1234)
+        self.assertEqual(correlated["seq"], 7)
+        self.assertNotIn("boot", response)
+
     def test_reads_channel_one_payload_with_rssi_and_snr(self):
         expected = {"type": "VERIFY_REQ", "gate": "GATE_A", "token": "abc"}
         line = "C1:-112,7.5:" + json.dumps(expected) + "\n"
