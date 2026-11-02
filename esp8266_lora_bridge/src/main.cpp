@@ -12,7 +12,7 @@
 #define LCD_ADDR        0x27
 #define OUTPUTS_ADDR    0x20
 #define RADIO_FREQ    433.1E6
-#define UART_BAUD      115200
+#define UART_BAUD      9600
 #define RADIO_TIMEOUT_MS 6000
 #define UART_FRAME_TIMEOUT_MS 1000
 #define MAX_UART_LINE  512

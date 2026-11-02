@@ -23,7 +23,7 @@ uint32_t bootId = 0;
 // slot unused; this ESP32-CAM does not configure the radio.
 #define BRIDGE_UART_RX  13
 #define BRIDGE_UART_TX  14
-#define BRIDGE_BAUD     115200
+#define BRIDGE_BAUD     9600
 #define BRIDGE_TIMEOUT_MS 20000  // Per-attempt timeout; up to three attempts are made
 
 HardwareSerial RadioBridge(2);
