@@ -307,6 +307,8 @@ class SyncProtocolTests(unittest.TestCase):
         self.assertIsNone(receiver.handle({"type": "SYNC_CHUNK", "id": transfer_id,
                                            "index": 1, "data": "W119"}))
         self.assertIsNone(receiver.handle({"type": "SYNC_CHUNK", "id": transfer_id,
+                                           "index": 1, "data": "W119"}))
+        self.assertIsNone(receiver.handle({"type": "SYNC_CHUNK", "id": transfer_id,
                                            "index": 0, "data": "eyJ2ZWhpY2xlcyI6"}))
 
         with patch.object(lora_sync_client, "reconcile_blob",
@@ -334,6 +336,61 @@ class SyncProtocolTests(unittest.TestCase):
 
         self.assertFalse(ack["ok"])
         self.assertEqual(ack["error"], "checksum mismatch")
+
+    def test_incomplete_transfer_is_not_acknowledged_as_success(self):
+        receiver = lora_sync_client.SyncReceiver()
+        receiver.handle({"type": "SYNC_BEGIN", "id": "incomplete", "size": 2,
+                         "chunks": 2, "sha256": "0" * 64})
+        receiver.handle({"type": "SYNC_CHUNK", "id": "incomplete", "index": 0,
+                         "data": "e30="})
+
+        ack = receiver.handle({"type": "SYNC_END", "id": "incomplete"})
+
+        self.assertFalse(ack["ok"])
+        self.assertEqual(ack["error"], "incomplete transfer")
+
+    def test_publisher_matches_ack_to_active_transfer(self):
+        publisher = lora_sync_server.SyncPublisher()
+        publisher.transfer_id = "expected-transfer"
+        publisher.candidate_watermark = "2026-11-06 12:00:00"
+        publisher.queue_ids = [7]
+        publisher.frames = [{"type": "SYNC_END"}]
+
+        with patch.object(lora_sync_server, "mark_sent") as mark_sent:
+            self.assertFalse(publisher.handle_ack({
+                "type": "SYNC_ACK", "id": "different-transfer", "ok": True}))
+            self.assertTrue(publisher.handle_ack({
+                "type": "SYNC_ACK", "id": "expected-transfer", "ok": True}))
+
+        mark_sent.assert_called_once_with(7)
+        self.assertEqual(publisher.watermark, "2026-11-06 12:00:00")
+        self.assertIsNone(publisher.transfer_id)
+
+    def test_publisher_retries_transfer_after_ack_timeout(self):
+        class SerialWriter:
+            def __init__(self):
+                self.writes = []
+
+            def write(self, data):
+                self.writes.append(data)
+
+        publisher = lora_sync_server.SyncPublisher()
+        publisher.transfer_id = "transfer-1"
+        publisher.frames = [
+            {"type": "SYNC_BEGIN", "id": "transfer-1"},
+            {"type": "SYNC_END", "id": "transfer-1"},
+        ]
+        publisher.awaiting_ack = True
+        publisher.ack_deadline = 99
+        publisher.last_frame = 0
+        writer = SerialWriter()
+
+        with patch.object(lora_sync_server.time, "monotonic", return_value=100):
+            publisher.poll(writer)
+
+        self.assertEqual(publisher.retries, 1)
+        self.assertEqual(publisher.frame_index, 1)
+        self.assertIn(b'"type":"SYNC_BEGIN"', writer.writes[0])
 
     def test_sync_query_uses_each_table_timestamp_column(self):
         with tempfile.TemporaryDirectory() as directory:

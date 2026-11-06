@@ -21,6 +21,7 @@
 
 #define FREQ_CH1   433.1E6
 #define FREQ_CH2   433.5E6
+#define SYNC_ACK_TIMEOUT_MS 10000
 
 int      currentCh = 1;
 
@@ -83,7 +84,7 @@ void loop() {
         if (waitForReply) {
             uint32_t started = millis();
             bool received = false;
-            while (millis() - started < 2500) {
+            while (millis() - started < SYNC_ACK_TIMEOUT_MS) {
                 int packetSize = LoRa.parsePacket();
                 if (packetSize) {
                     Serial.print("C2:");

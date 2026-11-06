@@ -88,7 +88,14 @@ def main():
     print(f"[SYNC-RX] listening on {SERIAL_PORT}")
     with serial.Serial(SERIAL_PORT, BAUD, timeout=1) as ser:
         while True:
-            raw = ser.readline().decode("utf-8", errors="ignore").strip()
+            raw_bytes = ser.readline()
+            if not raw_bytes:
+                continue
+            try:
+                raw = raw_bytes.decode("utf-8").strip()
+            except UnicodeDecodeError:
+                print(f"[SYNC-RX] ignored non-UTF-8 serial frame: {len(raw_bytes)} bytes")
+                continue
             if not raw:
                 continue
             if raw.startswith("C2:"):
@@ -96,12 +103,30 @@ def main():
             try:
                 message = json.loads(raw)
                 if isinstance(message, dict):
+                    message_type = message.get("type")
+                    transfer_id = message.get("id")
+                    safe_type = repr(message_type[:32]) if isinstance(message_type, str) else "<invalid>"
+                    safe_id = repr(transfer_id[:64]) if isinstance(transfer_id, str) else "<invalid>"
+                    details = ""
+                    if message_type == "SYNC_BEGIN":
+                        details = (f" size={message.get('size')} "
+                                   f"chunks={message.get('chunks')}")
+                    elif message_type == "SYNC_CHUNK":
+                        data = message.get("data")
+                        encoded_size = len(data) if isinstance(data, str) else 0
+                        details = (f" chunk={message.get('index')} "
+                                   f"encoded_bytes={encoded_size}")
+                    print(f"[SYNC-RX] received type={safe_type} id={safe_id}{details}")
                     ack = receiver.handle(message)
                     if ack:
                         ser.write(("C2:" + json.dumps(ack, separators=(",", ":")) + "\n").encode())
-                        print(f"[SYNC-RX] {ack['id']} ok={ack['ok']}")
+                        ack_id = ack.get("id")
+                        safe_ack_id = repr(ack_id[:64]) if isinstance(ack_id, str) else "<invalid>"
+                        print(f"[SYNC-RX] queued ACK id={safe_ack_id} ok={ack['ok']}")
+                else:
+                    print(f"[SYNC-RX] ignored non-object JSON frame: {len(raw_bytes)} bytes")
             except json.JSONDecodeError:
-                print(f"[SYNC-RX] ignored malformed frame: {raw[:80]}")
+                print(f"[SYNC-RX] ignored malformed frame: {len(raw_bytes)} bytes")
 
 
 if __name__ == "__main__":
