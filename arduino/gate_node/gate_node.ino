@@ -16,21 +16,32 @@ constexpr size_t LORA_MAX_PACKET_BYTES = 255;
 uint32_t bootId = 0;
 uint16_t seq = 0;
 
-// UART2 link to the ESP-12E LoRa bridge (CH1, 433.1 MHz). Do not use the
-// microSD slot; GPIO 13 and 14 are shared with that interface.
-constexpr int BRIDGE_UART_RX = 13;
-constexpr int BRIDGE_UART_TX = 14;
-constexpr uint32_t BRIDGE_BAUD = 115200;
-constexpr unsigned long BRIDGE_TIMEOUT_MS = 10000;
+// UART0 carries the ESP-12E protocol and is also used for firmware upload.
+constexpr int BRIDGE_UART_RX = 3;
+constexpr int BRIDGE_UART_TX = 1;
+constexpr uint32_t BRIDGE_BAUD = 9600;
+constexpr unsigned long BRIDGE_TIMEOUT_MS = 20000;
+constexpr uint8_t MAX_BRIDGE_ATTEMPTS = 3;
 
-HardwareSerial RadioBridge(2);
+HardwareSerial& RadioBridge = Serial;
 ESP32QRCodeReader qrReader(CAMERA_MODEL_AI_THINKER);
+
+enum class BridgeReplyStatus {
+    RESPONSE,
+    ERROR,
+    TIMEOUT
+};
+
+struct BridgeReply {
+    BridgeReplyStatus status;
+    String body;
+};
 
 // ── Forward declarations ──────────────────────────────
 bool sendVerifyRequest(const String& fullPayload, uint16_t requestSeq);
-String waitForBridgeReply(unsigned long timeoutMs);
+BridgeReply waitForBridgeReply(unsigned long timeoutMs, uint32_t requestBoot,
+                               uint16_t requestSeq);
 void sendStatus(const char* status, const String& detail = String());
-bool handleSerialCommand(const String& line);
 String qrScanOnce();
 
 bool isLoRaPacketSizeValid(size_t byteLength) {
@@ -47,70 +58,27 @@ String cleanStatusDetail(const String& value) {
     return clean;
 }
 
-bool handleSerialCommand(const String& line) {
-    if (line.startsWith("SET_GATE=")) {
-        String newId = line.substring(9);
-        newId.trim();
-        if (newId.length() > 0) {
-            GATE_ID = newId;
-            Serial.printf("[GATE] GATE_ID now = %s\n", GATE_ID.c_str());
-            sendStatus("GATE_ID_SET", GATE_ID);
-            delay(1500);
-            sendStatus("READY");
-            return true;
-        }
-    }
-    if (line == "WHOAMI") {
-        Serial.printf("[GATE] current GATE_ID = %s\n", GATE_ID.c_str());
-        sendStatus("GATE_ID", GATE_ID);
-        delay(1500);
-        sendStatus("READY");
-        return true;
-    }
-    return false;
-}
-
 void setup() {
-    Serial.begin(115200);
     RadioBridge.begin(BRIDGE_BAUD, SERIAL_8N1, BRIDGE_UART_RX, BRIDGE_UART_TX);
     delay(500);
     bootId = esp_random();
-    Serial.println("\n[GATE] booting");
-    Serial.println("[BRIDGE] ESP-12E UART ready");
     sendStatus("INITIALIZING");
 
-    if (qrReader.setup() != SETUP_OK) {
+    qrReader.setDebug(false);
+    const QRCodeReaderSetupErr cameraSetup = qrReader.setup();
+    if (cameraSetup != SETUP_OK) {
         sendStatus("CAMERA_ERROR");
-        Serial.println("[GATE] camera initialization failed (check camera and PSRAM)");
         while (true) {
             delay(1000);
         }
     }
     qrReader.beginOnCore(1);
-    Serial.println("[QR] camera ready (ESP32QRCodeReader)");
-
     sendStatus("CAMERA_READY");
     sendStatus("READY");
-    Serial.println("[GATE] ready");
 }
 
 void loop() {
-    String payload;
-
-    if (Serial.available()) {
-        String line = Serial.readStringUntil('\n');
-        line.trim();
-
-        // Runtime commands (SET_GATE=..., WHOAMI) — not tokens.
-        if (handleSerialCommand(line)) {
-            return;
-        }
-
-        // Otherwise treat the line as a signed payload for bench testing.
-        payload = line;
-    } else {
-        payload = qrScanOnce();
-    }
+    const String payload = qrScanOnce();
 
     if (payload.length() == 0) {
         delay(50);
@@ -123,30 +91,49 @@ void loop() {
     const String token = (p1 > 0 && p2 > p1)
         ? payload.substring(p1 + 1, p2)
         : payload;
-    Serial.printf("[GATE] token: %s\n", token.c_str());
     sendStatus("CHECKING", token);
 
     const uint16_t requestSeq = seq++;
+    while (RadioBridge.available()) RadioBridge.read();
+
     String reply;
-    for (uint8_t attempt = 0; attempt < 3 && reply.length() == 0; ++attempt) {
+    String bridgeError;
+    for (uint8_t attempt = 0; attempt < MAX_BRIDGE_ATTEMPTS; ++attempt) {
         if (!sendVerifyRequest(payload, requestSeq)) {
             sendStatus("REQUEST_TOO_LARGE");
             delay(1500);
             sendStatus("READY");
             return;
         }
-        reply = waitForBridgeReply(BRIDGE_TIMEOUT_MS);
+        const BridgeReply bridgeReply = waitForBridgeReply(
+            BRIDGE_TIMEOUT_MS, bootId, requestSeq);
+        if (bridgeReply.status == BridgeReplyStatus::RESPONSE) {
+            reply = bridgeReply.body;
+            break;
+        }
+        if (bridgeReply.status == BridgeReplyStatus::ERROR) {
+            bridgeError = bridgeReply.body;
+            if (bridgeError != "TIMEOUT") break;
+        } else {
+            bridgeError = "UART_TIMEOUT";
+        }
     }
     if (reply.length() == 0) {
-        Serial.println("[GATE] timeout");
-        sendStatus("REJECTED", "Timeout");
+        sendStatus("BRIDGE_ERROR", bridgeError.length() > 0 ? bridgeError : "UNKNOWN");
         return;
     }
 
     JSONVar obj = JSON.parse(reply);
+    if (JSON.typeof(obj) != "object" || !obj.hasOwnProperty("granted") ||
+        !obj.hasOwnProperty("reg") ||
+        JSON.typeof(obj["granted"]) != "boolean" ||
+        JSON.typeof(obj["reg"]) != "string") {
+        sendStatus("BRIDGE_ERROR", "BAD_RESPONSE");
+        return;
+    }
+
     const bool granted = (bool)obj["granted"];
     const String reg = (const char*)obj["reg"];
-    Serial.printf("[GATE] reply: %s\n", reply.c_str());
     sendStatus(granted ? "VERIFIED" : "REJECTED", reg);
 }
 
@@ -154,20 +141,20 @@ String qrScanOnce() {
     QRCodeData qrCodeData;
     if (qrReader.receiveQrCode(&qrCodeData, 100) && qrCodeData.valid) {
         String payload = String((const char*)qrCodeData.payload);
-        Serial.printf("[QR] decoded: %s\n", payload.c_str());
         return payload;
     }
     return "";
 }
 
 void sendStatus(const char* status, const String& detail) {
-    RadioBridge.print("STATUS:");
-    RadioBridge.print(status);
+    String frame = "STATUS:";
+    frame += status;
     if (detail.length() > 0) {
-        RadioBridge.print(':');
-        RadioBridge.print(cleanStatusDetail(detail));
+        frame += ':';
+        frame += cleanStatusDetail(detail);
     }
-    RadioBridge.println();
+    frame += '\n';
+    RadioBridge.print(frame);
 }
 
 bool sendVerifyRequest(const String& fullPayload, uint16_t requestSeq) {
@@ -180,22 +167,56 @@ bool sendVerifyRequest(const String& fullPayload, uint16_t requestSeq) {
     const String body = JSON.stringify(request);
 
     if (!isLoRaPacketSizeValid(body.length())) {
-        Serial.printf(
-            "[BRIDGE] request rejected locally: JSON body is %u bytes; "
-            "LoRa limit is %u bytes\n",
-            (unsigned int)body.length(),
-            (unsigned int)LORA_MAX_PACKET_BYTES
-        );
         return false;
     }
 
-    RadioBridge.print("REQ:");
-    RadioBridge.println(body);
-    Serial.printf("[BRIDGE] request sent (%u bytes)\n", (unsigned int)body.length());
+    String frame = "REQ:";
+    frame += bootId;
+    frame += ':';
+    frame += requestSeq;
+    frame += ':';
+    frame += body;
+    frame += '\n';
+    RadioBridge.print(frame);
     return true;
 }
 
-String waitForBridgeReply(unsigned long timeoutMs) {
+bool parseUnsignedDecimal(const String& value, uint32_t maximum, uint32_t& result) {
+    if (value.length() == 0) return false;
+
+    uint32_t parsed = 0;
+    for (size_t i = 0; i < value.length(); ++i) {
+        const char c = value[i];
+        if (c < '0' || c > '9') return false;
+        const uint8_t digit = static_cast<uint8_t>(c - '0');
+        if (parsed > (maximum - digit) / 10) return false;
+        parsed = parsed * 10 + digit;
+    }
+    result = parsed;
+    return true;
+}
+
+bool matchesRequest(const JSONVar& response, uint32_t requestBoot,
+                    uint16_t requestSeq) {
+    if (JSON.typeof(response) != "object" ||
+        !response.hasOwnProperty("type") ||
+        !response.hasOwnProperty("boot") ||
+        !response.hasOwnProperty("seq") ||
+        JSON.typeof(response["type"]) != "string" ||
+        JSON.typeof(response["boot"]) != "number" ||
+        JSON.typeof(response["seq"]) != "number" ||
+        !response.hasPropertyEqual("type", "VERIFY_RESP")) {
+        return false;
+    }
+
+    const double responseBoot = (double)response["boot"];
+    const double responseSeq = (double)response["seq"];
+    return responseBoot == static_cast<double>(requestBoot) &&
+        responseSeq == static_cast<double>(requestSeq);
+}
+
+BridgeReply waitForBridgeReply(unsigned long timeoutMs, uint32_t requestBoot,
+                               uint16_t requestSeq) {
     const unsigned long startTime = millis();
     String line;
     bool lineTooLong = false;
@@ -210,11 +231,31 @@ String waitForBridgeReply(unsigned long timeoutMs) {
                 if (!lineTooLong) {
                     line.trim();
                     if (line.startsWith("ERR:")) {
-                        Serial.printf("[BRIDGE] %s\n", line.c_str());
-                        return "";
+                        const int bootSeparator = line.indexOf(':', 4);
+                        const int seqSeparator = bootSeparator < 0
+                            ? -1 : line.indexOf(':', bootSeparator + 1);
+                        uint32_t responseBoot = 0;
+                        uint32_t responseSeq = 0;
+                        if (seqSeparator > bootSeparator &&
+                            parseUnsignedDecimal(
+                                line.substring(4, bootSeparator), UINT32_MAX,
+                                responseBoot) &&
+                            parseUnsignedDecimal(
+                                line.substring(bootSeparator + 1, seqSeparator),
+                                UINT16_MAX, responseSeq) &&
+                            responseBoot == requestBoot &&
+                            responseSeq == requestSeq &&
+                            line.length() > static_cast<unsigned int>(seqSeparator + 1)) {
+                            return {BridgeReplyStatus::ERROR,
+                                    line.substring(seqSeparator + 1)};
+                        }
                     }
                     if (line.startsWith("RSP:")) {
-                        return line.substring(4);
+                        const String responseBody = line.substring(4);
+                        const JSONVar response = JSON.parse(responseBody);
+                        if (matchesRequest(response, requestBoot, requestSeq)) {
+                            return {BridgeReplyStatus::RESPONSE, responseBody};
+                        }
                     }
                 }
                 line = "";
@@ -227,5 +268,5 @@ String waitForBridgeReply(unsigned long timeoutMs) {
         }
         delay(1);
     }
-    return "";
+    return {BridgeReplyStatus::TIMEOUT, ""};
 }
