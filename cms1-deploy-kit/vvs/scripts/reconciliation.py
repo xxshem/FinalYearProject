@@ -3,10 +3,13 @@
 Reconciliation engine (LWW) with clone-alert escalation.
 CMS2 uses this to merge incoming CMS1 sync payloads.
 """
-import sqlite3, os
+import sqlite3
 from datetime import datetime, timedelta
 
-DB = os.path.expanduser("~/vvs/database/vvs.db")
+try:
+    from .config import DB_PATH as DB
+except ImportError:
+    from config import DB_PATH as DB
 
 TIMESTAMP_COL = {
     "vehicles":            "updated_at",
@@ -30,6 +33,24 @@ PK_COL = {
     "system_events":       "event_id",
 }
 
+PK_TYPE = {
+    "vehicles": int,
+    "gates": str,
+    "verification_logs": int,
+    "entry_exit": int,
+    "lora_metrics": int,
+    "operational_metrics": int,
+    "power_metrics": int,
+    "system_events": int,
+}
+
+TABLES = tuple(TIMESTAMP_COL)
+DELETE_ORDER = (
+    "verification_logs", "entry_exit", "lora_metrics",
+    "operational_metrics", "power_metrics", "system_events",
+    "vehicles", "gates",
+)
+
 
 def _parse_ts(v):
     if v is None:
@@ -45,12 +66,82 @@ def _parse_ts(v):
     return None
 
 
-def lww_upsert(table, rows, dry_run=False, on_insert=None):
-    """
-    Last-Write-Wins merge.
-    Returns (inserted, updated, kept_local).
-    If on_insert is given, called as on_insert(table, pk, row_dict) for each new row.
-    """
+def _validate_blob(blob, connection):
+    if not isinstance(blob, dict):
+        raise ValueError("transfer root must be an object")
+
+    metadata = blob.get("_sync")
+    if metadata is not None:
+        if (not isinstance(metadata, dict)
+                or set(metadata) != {"schema", "after_seq", "through_seq"}
+                or type(metadata["schema"]) is not int
+                or metadata["schema"] != 1
+                or type(metadata["after_seq"]) is not int
+                or type(metadata["through_seq"]) is not int
+                or metadata["after_seq"] < 0
+                or metadata["through_seq"] <= metadata["after_seq"]):
+            raise ValueError("invalid synchronization batch metadata")
+
+    validated = {}
+    deletes_blob = blob.get("_deletes", {})
+    if not isinstance(deletes_blob, dict):
+        raise ValueError("_deletes must be an object")
+    for table, rows in blob.items():
+        if table in ("_deletes", "_sync"):
+            continue
+        if table not in TABLES:
+            raise ValueError(f"unknown table: {table}")
+        if not isinstance(rows, list):
+            raise ValueError(f"{table} rows must be a list")
+
+        columns = {row[1] for row in connection.execute(
+            f'PRAGMA table_info("{table}")')}
+        pk_col = PK_COL[table]
+        ts_col = TIMESTAMP_COL[table]
+        if not {pk_col, ts_col}.issubset(columns):
+            raise ValueError(f"{table} schema is missing required columns")
+
+        seen_pks = set()
+        for row in rows:
+            if not isinstance(row, dict):
+                raise ValueError(f"{table} rows must be objects")
+            if not row or not set(row).issubset(columns):
+                raise ValueError(f"{table} row contains unknown or no columns")
+            if pk_col not in row or row[pk_col] is None or ts_col not in row:
+                raise ValueError(f"{table} row is missing its key or timestamp")
+            if type(row[pk_col]) is not PK_TYPE[table]:
+                raise ValueError(f"{table} primary key has an invalid type")
+            if _parse_ts(row[ts_col]) is None:
+                raise ValueError(f"{table} row has an invalid timestamp")
+            if row[pk_col] in seen_pks:
+                raise ValueError(f"{table} contains duplicate {pk_col}")
+            seen_pks.add(row[pk_col])
+        validated[table] = rows
+
+    validated_deletes = {}
+    for table, keys in deletes_blob.items():
+        if table not in TABLES:
+            raise ValueError(f"unknown delete table: {table}")
+        if not isinstance(keys, list):
+            raise ValueError(f"{table} deletes must be a list")
+        pk_col = PK_COL[table]
+        seen_pks = set()
+        row_pks = {row[pk_col] for row in validated.get(table, [])}
+        for key in keys:
+            if type(key) is not PK_TYPE[table]:
+                raise ValueError(f"{table} delete key has an invalid type")
+            if key in seen_pks:
+                raise ValueError(f"{table} contains duplicate delete keys")
+            if key in row_pks:
+                raise ValueError(f"{table} key cannot be upserted and deleted")
+            seen_pks.add(key)
+        if keys:
+            validated_deletes[table] = keys
+    return validated, validated_deletes
+
+
+def _lww_upsert(connection, table, rows, dry_run=False, on_insert=None,
+                prefer_equal_timestamp=False):
     if not rows:
         return 0, 0, 0
 
@@ -59,58 +150,71 @@ def lww_upsert(table, rows, dry_run=False, on_insert=None):
     if not ts_col or not pk_col:
         return 0, 0, 0
 
-    c = sqlite3.connect(DB)
-    c.row_factory = sqlite3.Row
-    cur = c.cursor()
-
+    cur = connection.cursor()
     ins = upd = kept = 0
 
-    for r in rows:
-        pk = r.get(pk_col)
-        if pk is None:
-            continue
-
+    for row in rows:
+        pk = row[pk_col]
         local = cur.execute(
-            f"SELECT * FROM {table} WHERE {pk_col}=?", (pk,)
+            f'SELECT * FROM "{table}" WHERE "{pk_col}"=?', (pk,)
         ).fetchone()
 
-        # ── New row ─────────────────────────────────
         if local is None:
-            cols = list(r.keys())
-            qs = ",".join("?" * len(cols))
-            cl = ",".join(cols)
+            cols = list(row)
+            quoted_cols = ",".join(f'"{column}"' for column in cols)
+            placeholders = ",".join("?" for _ in cols)
             if not dry_run:
                 cur.execute(
-                    f"INSERT INTO {table} ({cl}) VALUES ({qs})",
-                    [r[c_] for c_ in cols])
+                    f'INSERT INTO "{table}" ({quoted_cols}) VALUES ({placeholders})',
+                    [row[column] for column in cols])
             ins += 1
             if on_insert:
                 try:
-                    on_insert(table, pk, r)
-                except Exception as e:
-                    print(f"[recon] on_insert callback error: {e}")
+                    on_insert(table, pk, row)
+                except Exception as error:
+                    print(f"[recon] on_insert callback error: {error}")
             continue
 
-        # ── Existing row → LWW ──────────────────────
         local_ts = _parse_ts(local[ts_col])
-        inc_ts   = _parse_ts(r.get(ts_col))
-
-        if inc_ts and local_ts and inc_ts > local_ts:
-            cols = list(r.keys())
-            set_clause = ",".join(f"{c_}=?" for c_ in cols if c_ != pk_col)
-            values = [r[c_] for c_ in cols if c_ != pk_col] + [pk]
+        incoming_ts = _parse_ts(row.get(ts_col))
+        if (incoming_ts and
+                ((local_ts and incoming_ts > local_ts)
+                 or (prefer_equal_timestamp and
+                     (local_ts is None or incoming_ts == local_ts)))):
+            cols = [column for column in row if column != pk_col]
+            set_clause = ",".join(f'"{column}"=?' for column in cols)
+            values = [row[column] for column in cols] + [pk]
             if not dry_run:
                 cur.execute(
-                    f"UPDATE {table} SET {set_clause} WHERE {pk_col}=?",
+                    f'UPDATE "{table}" SET {set_clause} WHERE "{pk_col}"=?',
                     values)
             upd += 1
         else:
             kept += 1
 
-    if not dry_run:
-        c.commit()
-    c.close()
     return ins, upd, kept
+
+
+def lww_upsert(table, rows, dry_run=False, on_insert=None):
+    """Apply a last-write-wins merge for one table in its own transaction."""
+    if table not in TABLES:
+        return 0, 0, 0
+
+    c = sqlite3.connect(DB)
+    c.row_factory = sqlite3.Row
+    try:
+        c.execute("BEGIN IMMEDIATE")
+        result = _lww_upsert(c, table, rows, dry_run, on_insert)
+        if dry_run:
+            c.rollback()
+        else:
+            c.commit()
+        return result
+    except Exception:
+        c.rollback()
+        raise
+    finally:
+        c.close()
 
 
 def reconcile_blob(blob, dry_run=False, alert_callback=None):
@@ -121,14 +225,41 @@ def reconcile_blob(blob, dry_run=False, alert_callback=None):
     Returns {table: (ins, upd, kept)}.
     """
     new_alerts = []
+    prefer_equal_timestamp = (
+        isinstance(blob, dict) and blob.get("_sync") is not None)
 
     def on_insert(table, pk, row):
-        if table == "system_events" and row.get("event_type") == "clone_alert":
+        if (not dry_run and table == "system_events"
+                and row.get("event_type") == "clone_alert"):
             new_alerts.append(row)
 
-    report = {}
-    for table, rows in blob.items():
-        report[table] = lww_upsert(table, rows, dry_run, on_insert=on_insert)
+    connection = sqlite3.connect(DB)
+    connection.row_factory = sqlite3.Row
+    try:
+        validated, validated_deletes = _validate_blob(blob, connection)
+        connection.execute("BEGIN IMMEDIATE")
+        report = {}
+        for table in TABLES:
+            if table in validated:
+                report[table] = _lww_upsert(
+                    connection, table, validated[table], dry_run,
+                    on_insert=on_insert,
+                    prefer_equal_timestamp=prefer_equal_timestamp)
+        for table in DELETE_ORDER:
+            for key in validated_deletes.get(table, []):
+                if not dry_run:
+                    connection.execute(
+                        f'DELETE FROM "{table}" WHERE "{PK_COL[table]}"=?',
+                        (key,))
+        if dry_run:
+            connection.rollback()
+        else:
+            connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
 
     # Escalate
     for a in new_alerts:

@@ -1,0 +1,82 @@
+[
+  {
+    "name": "positive",
+    "message": "{\"type\":\"SYNC_ACK\",\"id\":\"transfer-1\",\"ok\":true}",
+    "result": "positive"
+  },
+  {
+    "name": "negative",
+    "message": "{\"type\":\"SYNC_ACK\",\"id\":\"transfer-1\",\"ok\":false}",
+    "result": "negative"
+  },
+  {
+    "name": "wrong transfer",
+    "message": "{\"type\":\"SYNC_ACK\",\"id\":\"other\",\"ok\":true}",
+    "result": "wrong_transfer"
+  },
+  {
+    "name": "duplicate ok",
+    "message": "{\"type\":\"SYNC_ACK\",\"id\":\"transfer-1\",\"ok\":true,\"ok\":false}",
+    "result": "malformed"
+  },
+  {
+    "name": "duplicate id",
+    "message": "{\"type\":\"SYNC_ACK\",\"id\":\"transfer-1\",\"id\":\"other\",\"ok\":true}",
+    "result": "malformed"
+  },
+  {
+    "name": "duplicate type",
+    "message": "{\"type\":\"SYNC_ACK\",\"type\":\"SYNC_ACK\",\"id\":\"transfer-1\",\"ok\":true}",
+    "result": "malformed"
+  },
+  {
+    "name": "nested substitutes",
+    "message": "{\"type\":\"SYNC_ACK\",\"extra\":{\"id\":\"transfer-1\",\"ok\":true}}",
+    "result": "malformed"
+  },
+  {
+    "name": "missing type",
+    "message": "{\"id\":\"transfer-1\",\"ok\":true}",
+    "result": "unrelated"
+  },
+  {
+    "name": "missing id",
+    "message": "{\"type\":\"SYNC_ACK\",\"ok\":true}",
+    "result": "malformed"
+  },
+  {
+    "name": "missing ok",
+    "message": "{\"type\":\"SYNC_ACK\",\"id\":\"transfer-1\"}",
+    "result": "malformed"
+  },
+  {
+    "name": "invalid boolean number",
+    "message": "{\"type\":\"SYNC_ACK\",\"id\":\"transfer-1\",\"ok\":1}",
+    "result": "malformed"
+  },
+  {
+    "name": "invalid boolean string",
+    "message": "{\"type\":\"SYNC_ACK\",\"id\":\"transfer-1\",\"ok\":\"true\"}",
+    "result": "malformed"
+  },
+  {
+    "name": "malformed json",
+    "message": "{\"type\":\"SYNC_ACK\",\"id\":\"transfer-1\",\"ok\":true",
+    "result": "malformed"
+  },
+  {
+    "name": "trailing data",
+    "message": "{\"type\":\"SYNC_ACK\",\"id\":\"transfer-1\",\"ok\":true} {}",
+    "result": "malformed"
+  },
+  {
+    "name": "nested decoy with valid top level",
+    "message": "{\"extra\":{\"id\":\"other\",\"ok\":false},\"type\":\"SYNC_ACK\",\"id\":\"transfer-1\",\"ok\":true}",
+    "result": "positive"
+  },
+  {
+    "name": "duplicate unrelated nested keys",
+    "message": "{\"extra\":{\"note\":1,\"note\":2},\"type\":\"SYNC_ACK\",\"id\":\"transfer-1\",\"ok\":true}",
+    "result": "positive"
+  }
+]

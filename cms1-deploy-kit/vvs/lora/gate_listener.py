@@ -153,7 +153,7 @@ def attach_request_identity(response, request):
     return correlated_response
 
 def read_tagged(ser):
-    raw = ser.readline().decode("utf-8", errors="ignore").strip()
+    raw = ser.readline().decode("utf-8").strip()
     if not raw: return None, None, None
     if raw.startswith("C1:"):
         payload = raw[3:]
@@ -187,7 +187,7 @@ def main():
             if ch is not None:
                 pkt = json.loads(payload)
                 if ch == 2:
-                    sync_publisher.handle_ack(pkt)
+                    sync_publisher.handle_ack(payload)
                 elif ch == 1 and pkt.get("type") == "VERIFY_REQ":
                       gate_id = pkt.get("gate", "UNKNOWN")
                       request_id = (f"{pkt.get('boot')}:{pkt.get('seq')}"

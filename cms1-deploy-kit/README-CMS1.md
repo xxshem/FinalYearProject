@@ -96,13 +96,35 @@ host. Copy the kit and VVS files from the development PC:
     scp cms1-deploy-kit/systemd/vvs-sync-client@.service pi@<CMS2-IP>:~/cms1-deploy-kit/systemd/
     scp -r cms1-deploy-kit/vvs pi@<CMS2-IP>:~/
     ssh pi@<CMS2-IP>
+    ls -l /dev/serial/by-id/
+    nano ~/vvs-sync-client.env
     bash ~/cms1-deploy-kit/install-cms2-client.sh
+
+Set `VVS_SERIAL_PORT` in `~/vvs-sync-client.env` to the exact persistent path
+reported under `/dev/serial/by-id/`, for example:
+
+    VVS_SERIAL_PORT=/dev/serial/by-id/<adapter-specific-name>
+
+Do not copy the example literally; use the path present on the CMS2 host. The
+installer refuses to enable the service until this value is configured. If the
+adapter has no by-id link, configure its verified device path and document the
+udev rule or hardware-specific selection used to keep that path stable. The
+receiver backs off and retries when the configured device is temporarily
+unavailable.
 
 The install script creates the mirror database and enables
 `vvs-sync-client@pi`. Check its status and transfer logs with:
 
     sudo systemctl status vvs-sync-client@pi --no-pager
     sudo journalctl -u vvs-sync-client@pi -f
+
+The CMS1 publisher sends independently acknowledged batches up to 4 KiB.
+CMS1 initialization adds a local change journal and durable ACK cursor; it
+tracks row changes by sequence number, including deletes, rather than relying
+on timestamps. CMS2 is initialized in mirror-only mode and does not create
+publisher journal triggers. If one record is larger than a batch, CMS1 logs
+the table and primary key and records the blocking item in the `sync_errors`
+table; it does not skip the item or advance the cursor past it.
 
 CMS2 receives the database mirror only; its dashboard is not installed by this
 client setup. To use another Linux account, replace `pi` in the service name

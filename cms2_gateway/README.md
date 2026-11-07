@@ -50,16 +50,20 @@ shorted to ground before powering the boards.
 ## USB serial on Linux
 
 Connect the NodeMCU to the Linux PC with a USB data cable. Its onboard USB to
-UART bridge (commonly CH340 or CP2102) normally appears as `/dev/ttyUSB0`;
-use `/dev/ttyUSB1` or another detected port if needed. The CMS2 sync client
-defaults to `/dev/ttyUSB0` and 115200 baud. Set `VVS_SERIAL_PORT` to override
-the path. The account running the client needs serial-device access, usually
-by membership in `dialout`:
+UART bridge (commonly CH340 or CP2102) may receive a dynamic `/dev/ttyUSB*`
+name. Prefer the persistent link under `/dev/serial/by-id/`:
 
 ```sh
+ls -l /dev/serial/by-id/
 sudo usermod -aG dialout "$USER"
 ```
 
+The CMS2 sync service requires `VVS_SERIAL_PORT` in
+`~/vvs-sync-client.env`, set to the exact device path shown on that host. For
+example, use `VVS_SERIAL_PORT=/dev/serial/by-id/<adapter-specific-name>` with
+the actual name substituted. The service runs at 115200 baud as its template
+user and has `dialout` as a supplementary group. The receiver logs open/read
+errors and reconnects with bounded backoff if the device is unavailable.
 Log out and back in for the group change to apply.
 
 ## Build, upload, and monitor

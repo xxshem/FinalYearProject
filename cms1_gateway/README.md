@@ -33,10 +33,11 @@ Expected:
 Host -> modem : "C1:<payload>\n", "C2:<payload>\n", or "C2W:<payload>\n"
 Modem -> host : "C1:<rssi>,<snr>:<payload>\n" or "C2:<payload>\n"
 
-`C2W` transmits on CH2 and waits up to 10 seconds for the CMS2 sync
-acknowledgment before returning to CH1. The window accommodates the SF12
-acknowledgment airtime and CMS2 reconciliation time. This stays within the
-15-second end-to-end acknowledgment timeout on the CMS1 host.
+`C2W` is used for `SYNC_END`. It transmits on CH2, then waits up to 15 seconds
+for a `SYNC_ACK` whose transfer ID matches the active END frame. Unrelated or
+malformed packets are ignored without ending the wait. The host deadline
+includes the END frame's estimated airtime, the firmware receive window, and a
+serial scheduling margin.
 
 ## Python Side (on Raspberry Pi)
     ~/vvs/lora/gate_listener.py

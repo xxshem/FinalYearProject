@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import os
 import sqlite3
+import sys
 
 try:
     from vvs.scripts.config import DB_PATH
@@ -10,7 +11,104 @@ except ImportError:
 DB = DB_PATH
 SCHEMA = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "database", "schema.sql"))
 
-def init():
+SYNC_TABLES = {
+    "vehicles": "vehicle_id",
+    "gates": "gate_id",
+    "verification_logs": "log_id",
+    "entry_exit": "record_id",
+    "lora_metrics": "metric_id",
+    "operational_metrics": "metric_id",
+    "power_metrics": "metric_id",
+    "system_events": "event_id",
+}
+
+
+def init_sync_tracking(db_path=DB):
+    """Create the local change journal and seed pre-existing rows once."""
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS sync_change_log (
+                seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                table_name TEXT NOT NULL,
+                row_key TEXT NOT NULL,
+                operation TEXT NOT NULL CHECK(operation IN ('upsert', 'delete'))
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS sync_state (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS sync_errors (
+                table_name TEXT NOT NULL,
+                row_key TEXT NOT NULL,
+                message TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                resolved_at TEXT,
+                PRIMARY KEY (table_name, row_key)
+            )
+        """)
+        for table, primary_key in SYNC_TABLES.items():
+            conn.execute(f"""
+                CREATE TRIGGER IF NOT EXISTS "sync_{table}_insert"
+                AFTER INSERT ON "{table}"
+                BEGIN
+                    INSERT INTO sync_change_log (table_name, row_key, operation)
+                    VALUES ('{table}', CAST(NEW."{primary_key}" AS TEXT), 'upsert');
+                END
+            """)
+            conn.execute(f"""
+                CREATE TRIGGER IF NOT EXISTS "sync_{table}_update"
+                AFTER UPDATE ON "{table}"
+                BEGIN
+                    INSERT INTO sync_change_log (table_name, row_key, operation)
+                    SELECT '{table}', CAST(OLD."{primary_key}" AS TEXT), 'delete'
+                    WHERE OLD."{primary_key}" IS NOT NEW."{primary_key}";
+                    INSERT INTO sync_change_log (table_name, row_key, operation)
+                    VALUES ('{table}', CAST(NEW."{primary_key}" AS TEXT), 'upsert');
+                END
+            """)
+            conn.execute(f"""
+                CREATE TRIGGER IF NOT EXISTS "sync_{table}_delete"
+                AFTER DELETE ON "{table}"
+                BEGIN
+                    INSERT INTO sync_change_log (table_name, row_key, operation)
+                    VALUES ('{table}', CAST(OLD."{primary_key}" AS TEXT), 'delete');
+                END
+            """)
+
+        conn.execute("""
+            INSERT OR IGNORE INTO sync_state (key, value)
+            VALUES ('acked_seq', '0')
+        """)
+        bootstrapped = conn.execute(
+            "SELECT 1 FROM sync_state WHERE key='bootstrap_complete'"
+        ).fetchone()
+        if bootstrapped is None:
+            for table, primary_key in SYNC_TABLES.items():
+                conn.execute(f"""
+                    INSERT INTO sync_change_log (table_name, row_key, operation)
+                    SELECT ?, CAST("{primary_key}" AS TEXT), 'upsert'
+                    FROM "{table}"
+                    ORDER BY "{primary_key}"
+                """, (table,))
+            conn.execute("""
+                INSERT INTO sync_state (key, value)
+                VALUES ('bootstrap_complete', '1')
+            """)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def init(include_sync_tracking=True):
     os.makedirs(os.path.dirname(DB), exist_ok=True)
     conn = sqlite3.connect(DB)
     try:
@@ -74,7 +172,12 @@ def init():
         conn.commit()
     finally:
         conn.close()
+    if include_sync_tracking:
+        init_sync_tracking(DB)
     print(f"[OK] Database created at {DB}")
 
 if __name__ == "__main__":
-    init()
+    unknown_args = set(sys.argv[1:]) - {"--mirror-only"}
+    if unknown_args:
+        raise SystemExit(f"unknown arguments: {', '.join(sorted(unknown_args))}")
+    init(include_sync_tracking="--mirror-only" not in sys.argv[1:])

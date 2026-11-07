@@ -11,7 +11,7 @@ def enqueue(op_type, vehicle_id=None, gate_id=None, qr_token=None, payload=None)
     c = sqlite3.connect(DB)
     c.execute("""INSERT OR IGNORE INTO offline_queue
         (operation_type, vehicle_id, gate_id, qr_token, payload, status)
-        VALUES (?,?,?,?,?,'pending')""",
+        VALUES (?,?,?,?,?,'done')""",
         (op_type, vehicle_id, gate_id, qr_token,
          json.dumps(payload) if payload else None))
     c.commit(); c.close()
@@ -22,13 +22,6 @@ def pending(limit=50):
         "SELECT * FROM offline_queue WHERE status='pending' "
         "ORDER BY created_at ASC LIMIT ?", (limit,))]
     c.close(); return rows
-
-def mark_sent(qid):
-    c = sqlite3.connect(DB)
-    c.execute("""UPDATE offline_queue SET status='sent',
-                 attempt_count=attempt_count+1, last_attempt=?
-                 WHERE queue_id=?""", (datetime.now(), qid))
-    c.commit(); c.close()
 
 def mark_failed(qid):
     c = sqlite3.connect(DB)

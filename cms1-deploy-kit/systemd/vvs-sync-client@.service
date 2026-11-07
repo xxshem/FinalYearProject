@@ -2,6 +2,8 @@
 Description=VVS CMS2 LoRa Sync Receiver for %i
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -9,9 +11,9 @@ User=%i
 SupplementaryGroups=dialout
 WorkingDirectory=/home/%i/vvs/lora
 Environment=PYTHONUNBUFFERED=1
-Environment=VVS_SERIAL_PORT=/dev/ttyUSB0
+EnvironmentFile=-/home/%i/vvs-sync-client.env
 ExecStart=/home/%i/vvs-venv/bin/python3 /home/%i/vvs/lora/lora_sync_client.py
-Restart=always
+Restart=on-failure
 RestartSec=10
 
 [Install]

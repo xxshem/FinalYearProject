@@ -11,8 +11,10 @@
  */
 
 #include <Arduino.h>
+#include <ctype.h>
 #include <SPI.h>
 #include <LoRa.h>
+#include "sync_ack_parser.h"
 
 // ── Pin map (ESP32 Dev Board) ────────────────────────
 #define LORA_SS    5
@@ -21,9 +23,41 @@
 
 #define FREQ_CH1   433.1E6
 #define FREQ_CH2   433.5E6
-#define SYNC_ACK_TIMEOUT_MS 10000
+#define SYNC_ACK_TIMEOUT_MS 15000
 
 int      currentCh = 1;
+
+bool jsonStringField(const String& json, const char* key, String& value) {
+    const String field = "\"" + String(key) + "\"";
+    int position = json.indexOf(field);
+    if (position < 0) return false;
+    position = json.indexOf(':', position + field.length());
+    if (position < 0) return false;
+
+    ++position;
+    while (position < json.length() &&
+           isspace(static_cast<unsigned char>(json[position]))) {
+        ++position;
+    }
+    if (position >= json.length() || json[position] != '"') return false;
+
+    const int start = ++position;
+    while (position < json.length()) {
+        if (json[position] == '\\') return false;
+        if (json[position] == '"') {
+            value = json.substring(start, position);
+            return true;
+        }
+        ++position;
+    }
+    return false;
+}
+
+void reportSyncTxError(const String& transferId) {
+    Serial.print("C2:{\"type\":\"SYNC_TX_ERROR\",\"id\":\"");
+    Serial.print(transferId);
+    Serial.println("\"}");
+}
 
 void applyChannel(int ch) {
     LoRa.idle();
@@ -31,6 +65,10 @@ void applyChannel(int ch) {
     LoRa.setSpreadingFactor(12);
     LoRa.setSignalBandwidth(125E3);
     LoRa.setCodingRate4(5);
+    LoRa.setPreambleLength(8);
+    LoRa.setSyncWord(0x12);
+    LoRa.disableCrc();
+    LoRa.disableInvertIQ();
     currentCh = ch;
 }
 
@@ -48,6 +86,10 @@ void setup() {
     LoRa.setSignalBandwidth(125E3);
     LoRa.setCodingRate4(5);
     LoRa.setTxPower(20);
+    LoRa.setPreambleLength(8);
+    LoRa.setSyncWord(0x12);
+    LoRa.disableCrc();
+    LoRa.disableInvertIQ();
     Serial.println("[GW1] ready on CH1 433.1 MHz; CH2 433.5 MHz, SF12");
 }
 
@@ -75,10 +117,34 @@ void loop() {
             line = "";
         }
 
+        String expectedTransferId;
+        if (waitForReply) {
+            String messageType;
+            if (!jsonStringField(line, "type", messageType)
+                || messageType != "SYNC_END"
+                || !jsonStringField(line, "id", expectedTransferId)
+                || expectedTransferId.length() == 0) {
+                Serial.println("[GW1] invalid C2W sync frame");
+                switchTo(1);
+                return;
+            }
+        }
+
         if (line.length()) {
-            LoRa.beginPacket();
+            const bool isCh2Frame = currentCh == 2;
+            String frameTransferId;
+            jsonStringField(line, "id", frameTransferId);
+            if (LoRa.beginPacket() != 1) {
+                if (isCh2Frame) reportSyncTxError(frameTransferId);
+                switchTo(1);
+                return;
+            }
             LoRa.print(line);
-            LoRa.endPacket();
+            if (LoRa.endPacket() != 1) {
+                if (isCh2Frame) reportSyncTxError(frameTransferId);
+                switchTo(1);
+                return;
+            }
         }
 
         if (waitForReply) {
@@ -87,13 +153,20 @@ void loop() {
             while (millis() - started < SYNC_ACK_TIMEOUT_MS) {
                 int packetSize = LoRa.parsePacket();
                 if (packetSize) {
-                    Serial.print("C2:");
-                    while (LoRa.available()) Serial.print((char)LoRa.read());
-                    Serial.println();
-                    received = true;
-                    break;
+                    String response;
+                    while (LoRa.available()) response += (char)LoRa.read();
+                    SyncAckResult ackResult = parseSyncAck(
+                        response.c_str(), response.length(),
+                        expectedTransferId.c_str());
+                    if (ackResult == SyncAckResult::Positive
+                        || ackResult == SyncAckResult::Negative) {
+                        Serial.print("C2:");
+                        Serial.println(response);
+                        received = true;
+                        break;
+                    }
                 }
-                delay(10);
+                delay(1);
             }
             if (!received) {
                 Serial.println("C2:{\"type\":\"SYNC_TIMEOUT\"}");
