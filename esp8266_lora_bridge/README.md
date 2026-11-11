@@ -103,7 +103,10 @@ The bridge forwards only the JSON body over LoRa, then returns the LoRa reply
 unchanged in an `RSP:` frame. The response JSON echoes the request `boot` and
 `seq` so the gate can discard stale or duplicate replies. Request-specific
 errors use `ERR:<boot-id>:<seq>:<reason>\n` and include `BAD_REQUEST`,
-`RADIO_INIT_FAILED`, `TX_FAILED`, and `TIMEOUT`. Errors unrelated to a
+`RADIO_INIT_FAILED`, `TX_FAILED`, `TX_TIMEOUT`, and `TIMEOUT`. LoRa TX uses a
+1500 ms completion deadline, radio reinitialization, and no more than one
+retransmission; repeated failures are logged and returned as a correlated
+request error. Errors unrelated to a
 correlatable request, such as malformed UART frames, retain the
 `ERR:<reason>\n` form. The gate drains pending UART input before starting a
 transaction and ignores replies/errors that do not match its current request

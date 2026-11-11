@@ -588,6 +588,10 @@ class SyncProtocolTests(unittest.TestCase):
             self.assertEqual(publisher.watermark, 0)
             self.assertIsNone(publisher.transfer_id)
 
+    def test_publisher_ack_deadline_matches_bounded_gateway_window(self):
+        self.assertEqual(lora_sync_server.FIRMWARE_ACK_WINDOW_SEC, 1)
+        self.assertLessEqual(lora_sync_server.FIRMWARE_ACK_WINDOW_SEC, 1)
+
     def test_ack_requires_end_phase_and_rejects_late_duplicate_and_stale_ack(self):
         publisher = lora_sync_server.SyncPublisher()
         publisher.transfer_id = "transfer-1"
@@ -623,6 +627,8 @@ class SyncProtocolTests(unittest.TestCase):
             self.assertTrue(publisher.handle_ack(
                 '{"type":"SYNC_ACK","id":"nack-transfer","ok":false}'))
             self.assertEqual(publisher.watermark, 0)
+            self.assertEqual(publisher.transfer_id, "nack-transfer")
+            self.assertTrue(publisher.awaiting_ack)
             restarted = lora_sync_server.SyncPublisher(str(db_path))
             self.assertEqual(restarted.watermark, 0)
 
@@ -667,7 +673,7 @@ class SyncProtocolTests(unittest.TestCase):
         self.assertEqual(publisher.frame_index, 1)
         self.assertIn(b'"type":"SYNC_BEGIN"', writer.writes[0])
 
-    def test_gateway_transmit_error_retries_active_transfer(self):
+    def test_gateway_radio_errors_retry_active_transfer_identity(self):
         class SerialWriter:
             def __init__(self):
                 self.writes = []
@@ -680,14 +686,29 @@ class SyncProtocolTests(unittest.TestCase):
         publisher.frames = [{"type": "SYNC_BEGIN", "id": "transfer-1"}]
         writer = SerialWriter()
 
-        with patch.object(lora_sync_server.time, "monotonic", return_value=123):
-            self.assertTrue(publisher.handle_ack({
-                "type": "SYNC_TX_ERROR", "id": "transfer-1"}))
-            publisher.poll(writer)
+        for error_type in ("SYNC_TX_ERROR", "SYNC_TIMEOUT"):
+            with self.subTest(error_type=error_type):
+                publisher.transfer_id = "transfer-1"
+                publisher.frames = [
+                    {"type": "SYNC_BEGIN", "id": "transfer-1"},
+                    {"type": "SYNC_END", "id": "transfer-1"},
+                ]
+                publisher.frame_index = 2
+                publisher.awaiting_ack = True
+                publisher.retries = 0
+                publisher.ack_deadline = 999
+                publisher.next_frame_at = 0
+                writer.writes.clear()
+                with patch.object(lora_sync_server.time, "monotonic",
+                                  return_value=123):
+                    self.assertTrue(publisher.handle_ack({
+                        "type": error_type, "id": "transfer-1"}))
+                    publisher.poll(writer)
 
-        self.assertEqual(publisher.retries, 1)
-        self.assertEqual(publisher.frame_index, 1)
-        self.assertIn(b'"type":"SYNC_BEGIN"', writer.writes[0])
+                self.assertEqual(publisher.transfer_id, "transfer-1")
+                self.assertEqual(publisher.retries, 1)
+                self.assertEqual(publisher.frame_index, 1)
+                self.assertIn(b'"id":"transfer-1"', writer.writes[0])
 
     def test_receiver_rejects_transfer_above_declared_limits(self):
         receiver = lora_sync_client.SyncReceiver()
@@ -756,11 +777,11 @@ class SyncProtocolTests(unittest.TestCase):
         self.assertTrue(frame_sizes)
         self.assertLessEqual(max(frame_sizes), 255)
 
-    def test_sx127x_airtime_matches_sf12_profile_estimate(self):
+    def test_sx127x_airtime_matches_sf7_profile_estimate(self):
         self.assertAlmostEqual(
-            lora_sync_server.lora_airtime_seconds(217), 7.708672, places=6)
+            lora_sync_server.lora_airtime_seconds(217), 0.343296, places=6)
         self.assertAlmostEqual(
-            lora_sync_server.lora_airtime_seconds(218), 7.872512, places=6)
+            lora_sync_server.lora_airtime_seconds(218), 0.343296, places=6)
 
     def test_publisher_paces_frames_by_airtime(self):
         class SerialWriter:

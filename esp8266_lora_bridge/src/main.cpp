@@ -14,6 +14,8 @@
 #define RADIO_FREQ    433.1E6
 #define UART_BAUD      9600
 #define RADIO_TIMEOUT_MS 6000
+#define RADIO_TX_TIMEOUT_MS 1500
+#define RADIO_TX_ATTEMPTS 2
 #define UART_FRAME_TIMEOUT_MS 1000
 #define MAX_UART_LINE  512
 #define MAX_LORA_PACKET 255
@@ -36,6 +38,7 @@ LiquidCrystal_I2C lcd(LCD_ADDR, 16, 2);
 String uartLine;
 bool uartLineTooLong = false;
 bool radioReady = false;
+volatile bool radioTxComplete = false;
 FeedbackStage feedbackStage = FEEDBACK_IDLE;
 unsigned long feedbackDeadline = 0;
 unsigned long lastUartByteAt = 0;
@@ -191,6 +194,82 @@ bool handleStatus(const String& line) {
     return true;
 }
 
+void configureRadio() {
+    LoRa.setSpreadingFactor(7);
+    LoRa.setSignalBandwidth(125E3);
+    LoRa.setCodingRate4(5);
+    LoRa.setTxPower(2);
+    LoRa.setPreambleLength(8);
+    LoRa.setSyncWord(0x12);
+    LoRa.enableCrc();
+    LoRa.disableInvertIQ();
+}
+
+void handleRadioTxDone() {
+    radioTxComplete = true;
+}
+
+bool initializeRadio() {
+    LoRa.setPins(LORA_NSS, LORA_RESET, LORA_DIO0);
+    LoRa.setSPIFrequency(4E6);
+    if (!LoRa.begin(RADIO_FREQ)) {
+        radioReady = false;
+        return false;
+    }
+    configureRadio();
+    LoRa.onTxDone(handleRadioTxDone);
+    radioReady = true;
+    return true;
+}
+
+bool transmitRequest(const String& payload, bool& timedOut) {
+    timedOut = false;
+    for (uint8_t attempt = 1; attempt <= RADIO_TX_ATTEMPTS; ++attempt) {
+        if (!radioReady && !initializeRadio()) {
+            Serial.print("[BRIDGE] RADIO_INIT_FAILURE attempt=");
+            Serial.println(attempt);
+            continue;
+        }
+
+        LoRa.idle();
+        if (!LoRa.beginPacket()) {
+            Serial.print("[BRIDGE] RADIO_TX_START_FAILURE attempt=");
+            Serial.println(attempt);
+            LoRa.end();
+            radioReady = false;
+            continue;
+        }
+        LoRa.print(payload);
+        radioTxComplete = false;
+        if (!LoRa.endPacket(true)) {
+            Serial.print("[BRIDGE] RADIO_TX_START_FAILURE attempt=");
+            Serial.println(attempt);
+            LoRa.end();
+            radioReady = false;
+            continue;
+        }
+
+        const unsigned long started = millis();
+        while (!radioTxComplete &&
+               millis() - started < RADIO_TX_TIMEOUT_MS) {
+            serviceFeedback();
+            delay(1);
+        }
+        if (radioTxComplete) return true;
+
+        timedOut = true;
+        Serial.print("[BRIDGE] RADIO_TX_TIMEOUT attempt=");
+        Serial.println(attempt);
+        LoRa.end();
+        radioReady = false;
+    }
+
+    if (!radioReady && !initializeRadio()) {
+        Serial.println("[BRIDGE] RADIO_RECOVERY_FAILED");
+    }
+    return false;
+}
+
 void handleRequest(const String& line) {
     if (line.startsWith("STATUS:")) {
         if (!handleStatus(line)) sendBridgeError("BAD_STATUS");
@@ -215,7 +294,7 @@ void handleRequest(const String& line) {
         return;
     }
 
-    if (!radioReady) {
+    if (!radioReady && !initializeRadio()) {
         sendRequestError(requestBoot, static_cast<uint16_t>(requestSeq),
                          "RADIO_INIT_FAILED");
         return;
@@ -228,11 +307,10 @@ void handleRequest(const String& line) {
         return;
     }
 
-    LoRa.idle();
-    LoRa.beginPacket();
-    LoRa.print(payload);
-    if (!LoRa.endPacket()) {
-        sendRequestError(requestBoot, static_cast<uint16_t>(requestSeq), "TX_FAILED");
+    bool txTimedOut = false;
+    if (!transmitRequest(payload, txTimedOut)) {
+        sendRequestError(requestBoot, static_cast<uint16_t>(requestSeq),
+                         txTimedOut ? "TX_TIMEOUT" : "TX_FAILED");
         return;
     }
 
@@ -273,22 +351,11 @@ void setup() {
     allOutputsOff();
     lcdShow("VVS GATE NODE", "Initializing...");
 
-    LoRa.setPins(LORA_NSS, LORA_RESET, LORA_DIO0);
-    LoRa.setSPIFrequency(4E6);
-    if (!LoRa.begin(RADIO_FREQ)) {
+    if (!initializeRadio()) {
         lcdShow("RADIO FAIL", "Check SX1278");
         return;
     }
 
-    radioReady = true;
-    LoRa.setSpreadingFactor(7);
-    LoRa.setSignalBandwidth(125E3);
-    LoRa.setCodingRate4(5);
-    LoRa.setTxPower(2);
-    LoRa.setPreambleLength(8);
-    LoRa.setSyncWord(0x12);
-    LoRa.enableCrc();
-    LoRa.disableInvertIQ();
     lcdShow("LoRa ready", "Waiting for gate");
 }
 

@@ -23,9 +23,42 @@
 
 #define FREQ_CH1   433.1E6
 #define FREQ_CH2   433.5E6
-#define SYNC_ACK_TIMEOUT_MS 15000
+#define SYNC_ACK_TIMEOUT_MS 1000
+#define RADIO_TX_TIMEOUT_MS 1500
+#define RADIO_RECOVERY_RETRIES 2
+#define RADIO_RECOVERY_RETRY_DELAY_MS 100
+#define RADIO_RECOVERY_RETRY_INTERVAL_MS 5000UL
+#define RADIO_TX_ATTEMPTS 2
+#define SERIAL_LINE_MAX 512
 
-int      currentCh = 1;
+enum RadioState {
+    CH1_GATE_LISTEN,
+    CH2_SYNC_TX,
+    CH2_ACK_WAIT,
+    CH1_GATE_SERVICE,
+    RADIO_RECOVERY,
+    RADIO_RECOVERY_PENDING
+};
+
+RadioState radioState = CH1_GATE_LISTEN;
+int currentCh = 1;
+bool radioReady = false;
+volatile bool radioTxComplete = false;
+String serialLine;
+String pendingCommand;
+String queuedCommand;
+bool serialLineTooLong = false;
+String txPayload;
+String txTransferId;
+int txChannel = 1;
+bool txWaitForAck = false;
+uint8_t txAttempts = 0;
+uint8_t recoveryAttempts = 0;
+unsigned long txStartedAt = 0;
+unsigned long ackDeadline = 0;
+unsigned long recoveryNextAt = 0;
+
+void scheduleBackgroundRecovery();
 
 bool jsonStringField(const String& json, const char* key, String& value) {
     const String field = "\"" + String(key) + "\"";
@@ -59,134 +92,332 @@ void reportSyncTxError(const String& transferId) {
     Serial.println("\"}");
 }
 
+void reportSyncTimeout(const String& transferId) {
+    Serial.print("C2:{\"type\":\"SYNC_TIMEOUT\",\"id\":\"");
+    Serial.print(transferId);
+    Serial.println("\"}");
+}
+
+void handleRadioTxDone() {
+    radioTxComplete = true;
+}
+
+void configureRadio() {
+    LoRa.setSpreadingFactor(7);
+    LoRa.setSignalBandwidth(125E3);
+    LoRa.setCodingRate4(5);
+    LoRa.setPreambleLength(8);
+    LoRa.setSyncWord(0x12);
+    LoRa.enableCrc();
+    LoRa.disableInvertIQ();
+    LoRa.setTxPower(2);
+}
+
+bool initializeRadio(int channel) {
+    radioReady = false;
+    radioTxComplete = false;
+    LoRa.setPins(LORA_SS, LORA_RST, LORA_DIO0);
+    if (!LoRa.begin(channel == 1 ? FREQ_CH1 : FREQ_CH2)) return false;
+    configureRadio();
+    LoRa.onTxDone(handleRadioTxDone);
+    currentCh = channel;
+    radioTxComplete = false;
+    radioReady = true;
+    return true;
+}
+
 void applyChannel(int ch) {
     LoRa.idle();
     LoRa.setFrequency(ch == 1 ? FREQ_CH1 : FREQ_CH2);
-    LoRa.setSpreadingFactor(7);
-    LoRa.setSignalBandwidth(125E3);
-    LoRa.setCodingRate4(5);
-    LoRa.setPreambleLength(8);
-    LoRa.setSyncWord(0x12);
-    LoRa.enableCrc();
-    LoRa.disableInvertIQ();
-    LoRa.setTxPower(2);
+    configureRadio();
     currentCh = ch;
 }
 
-// ─────────────────────────────────────────────────────
-void setup() {
-    Serial.begin(115200);
-    delay(500);
-
-    LoRa.setPins(LORA_SS, LORA_RST, LORA_DIO0);
-    if (!LoRa.begin(FREQ_CH1)) {
-        Serial.println("[GW1] LoRa init failed");
-        while (1) delay(1000);
-    }
-    LoRa.setSpreadingFactor(7);
-    LoRa.setSignalBandwidth(125E3);
-    LoRa.setCodingRate4(5);
-    LoRa.setTxPower(2);
-    LoRa.setPreambleLength(8);
-    LoRa.setSyncWord(0x12);
-    LoRa.enableCrc();
-    LoRa.disableInvertIQ();
-    Serial.println("[GW1] ready on CH1 433.1 MHz; CH2 433.5 MHz, SF7");
-}
-
 void switchTo(int ch) {
-    if (ch == currentCh) return;
+    if (ch == currentCh || !radioReady) return;
     applyChannel(ch);
 }
 
-void loop() {
-    // USB -> LoRa
-    if (Serial.available()) {
-        String line = Serial.readStringUntil('\n');
-        line.trim();
-        bool waitForReply = line.startsWith("C2W:");
-        if (waitForReply) {
-            switchTo(2);
-            line = line.substring(4);
-        } else if (line.startsWith("C1:")) {
-            switchTo(1);
-            line = line.substring(3);
-        } else if (line.startsWith("C2:")) {
-            switchTo(2);
-            line = line.substring(3);
+void finishTransmitFailure() {
+    Serial.print("[GW1] RADIO_TX_FAILURE channel=");
+    Serial.print(txChannel);
+    Serial.print(" attempts=");
+    Serial.println(txAttempts);
+    if (txChannel == 2) reportSyncTxError(txTransferId);
+    radioState = CH1_GATE_LISTEN;
+    if (radioReady) switchTo(1);
+    txPayload = "";
+    txTransferId = "";
+    txWaitForAck = false;
+    if (!radioReady) {
+        scheduleBackgroundRecovery();
+    }
+}
+
+void startRadioRecovery() {
+    Serial.println("[GW1] RADIO_RECOVERY after transmit failure");
+    LoRa.onTxDone(nullptr);
+    radioTxComplete = false;
+    LoRa.end();
+    radioReady = false;
+    recoveryAttempts = 0;
+    recoveryNextAt = millis();
+    radioState = RADIO_RECOVERY;
+}
+
+void scheduleBackgroundRecovery() {
+    radioReady = false;
+    radioTxComplete = false;
+    recoveryAttempts = 0;
+    recoveryNextAt = millis() + RADIO_RECOVERY_RETRY_INTERVAL_MS;
+    radioState = RADIO_RECOVERY_PENDING;
+    Serial.print("[GW1] RADIO_RECOVERY_PENDING retry_ms=");
+    Serial.println(RADIO_RECOVERY_RETRY_INTERVAL_MS);
+}
+
+void startTransmitAttempt() {
+    if (!radioReady || !LoRa.beginPacket()) {
+        startRadioRecovery();
+        return;
+    }
+    LoRa.print(txPayload);
+    radioTxComplete = false;
+    if (!LoRa.endPacket(true)) {
+        startRadioRecovery();
+        return;
+    }
+    txStartedAt = millis();
+    radioState = txChannel == 2 ? CH2_SYNC_TX : CH1_GATE_SERVICE;
+}
+
+void beginTransmit(const String& payload, int channel, bool waitForAck,
+                   const String& transferId) {
+    txPayload = payload;
+    txChannel = channel;
+    txWaitForAck = waitForAck;
+    txTransferId = transferId;
+    txAttempts = 1;
+    if (!radioReady) {
+        txAttempts = 0;
+        if (radioState != RADIO_RECOVERY_PENDING) {
+            scheduleBackgroundRecovery();
+        }
+        return;
+    }
+    switchTo(channel);
+    startTransmitAttempt();
+}
+
+void recoverRadio() {
+    if (static_cast<long>(millis() - recoveryNextAt) < 0) return;
+    ++recoveryAttempts;
+    const bool backgroundRecovery = txPayload.length() == 0;
+    const int channel = backgroundRecovery ? 1 : txChannel;
+    Serial.print("[GW1] RADIO_RECOVERY_ATTEMPT ");
+    Serial.print(recoveryAttempts);
+    Serial.print('/');
+    Serial.println(RADIO_RECOVERY_RETRIES);
+    if (initializeRadio(channel)) {
+        Serial.print("[GW1] RADIO_RECOVERY_SUCCESS channel=");
+        Serial.println(channel);
+        if (txPayload.length() == 0) {
+            radioState = CH1_GATE_LISTEN;
+        } else if (txAttempts < RADIO_TX_ATTEMPTS) {
+            ++txAttempts;
+            startTransmitAttempt();
         } else {
-            line = "";
+            finishTransmitFailure();
         }
+        return;
+    }
+    radioReady = false;
+    radioTxComplete = false;
+    Serial.print("[GW1] RADIO_RECOVERY_ATTEMPT_FAILED ");
+    Serial.println(recoveryAttempts);
+    if (recoveryAttempts < RADIO_RECOVERY_RETRIES) {
+        recoveryNextAt = millis() + RADIO_RECOVERY_RETRY_DELAY_MS;
+        return;
+    }
+    if (txPayload.length() == 0) {
+        scheduleBackgroundRecovery();
+    } else {
+        finishTransmitFailure();
+    }
+}
 
-        String expectedTransferId;
-        if (waitForReply) {
-            String messageType;
-            if (!jsonStringField(line, "type", messageType)
-                || messageType != "SYNC_END"
-                || !jsonStringField(line, "id", expectedTransferId)
-                || expectedTransferId.length() == 0) {
-                Serial.println("[GW1] invalid C2W sync frame");
-                switchTo(1);
-                return;
-            }
+void serviceTransmit() {
+    if (!radioTxComplete) {
+        if (millis() - txStartedAt >= RADIO_TX_TIMEOUT_MS) {
+            Serial.println("[GW1] RADIO_TX_TIMEOUT; recovering radio");
+            startRadioRecovery();
         }
+        return;
+    }
+    if (txWaitForAck) {
+        ackDeadline = millis() + SYNC_ACK_TIMEOUT_MS;
+        radioState = CH2_ACK_WAIT;
+    } else {
+        radioState = CH1_GATE_LISTEN;
+        switchTo(1);
+        txPayload = "";
+        txTransferId = "";
+    }
+}
 
-        if (line.length()) {
-            const bool isCh2Frame = currentCh == 2;
-            String frameTransferId;
-            jsonStringField(line, "id", frameTransferId);
-            if (LoRa.beginPacket() != 1) {
-                if (isCh2Frame) reportSyncTxError(frameTransferId);
-                switchTo(1);
-                return;
-            }
-            LoRa.print(line);
-            if (LoRa.endPacket() != 1) {
-                if (isCh2Frame) reportSyncTxError(frameTransferId);
-                switchTo(1);
-                return;
-            }
-        }
+void finishAckWait() {
+    radioState = CH1_GATE_LISTEN;
+    switchTo(1);
+    txPayload = "";
+    txTransferId = "";
+    txWaitForAck = false;
+}
 
-        if (waitForReply) {
-            uint32_t started = millis();
-            bool received = false;
-            while (millis() - started < SYNC_ACK_TIMEOUT_MS) {
-                int packetSize = LoRa.parsePacket();
-                if (packetSize) {
-                    String response;
-                    while (LoRa.available()) response += (char)LoRa.read();
-                    SyncAckResult ackResult = parseSyncAck(
-                        response.c_str(), response.length(),
-                        expectedTransferId.c_str());
-                    if (ackResult == SyncAckResult::Positive
-                        || ackResult == SyncAckResult::Negative) {
-                        Serial.print("C2:");
-                        Serial.println(response);
-                        received = true;
-                        break;
-                    }
-                }
-                delay(1);
-            }
-            if (!received) {
-                Serial.println("C2:{\"type\":\"SYNC_TIMEOUT\"}");
-            }
-            switchTo(1);
-        } else if (currentCh == 2) {
-            switchTo(1);
+void serviceAckWait() {
+    const int packetSize = LoRa.parsePacket();
+    if (packetSize > 0) {
+        String response;
+        while (LoRa.available()) response += static_cast<char>(LoRa.read());
+        const SyncAckResult result = parseSyncAck(
+            response.c_str(), response.length(), txTransferId.c_str());
+        if (result == SyncAckResult::Positive || result == SyncAckResult::Negative) {
+            Serial.print("C2:");
+            Serial.println(response);
+            finishAckWait();
+            return;
         }
     }
+    if (static_cast<long>(millis() - ackDeadline) >= 0) {
+        reportSyncTimeout(txTransferId);
+        finishAckWait();
+    }
+}
 
-    // LoRa -> USB
-    int sz = LoRa.parsePacket();
-    if (sz) {
-        String out = (currentCh == 1) ? "C1:" : "C2:";
-        if (currentCh == 1) {
-            out += String(LoRa.packetRssi()) + "," +
-                   String(LoRa.packetSnr(), 1) + ":";
+void startCommand(const String& command) {
+    String line = command;
+    line.trim();
+    const bool waitForReply = line.startsWith("C2W:");
+    int channel = 0;
+    if (waitForReply) {
+        channel = 2;
+        line.remove(0, 4);
+    } else if (line.startsWith("C1:")) {
+        channel = 1;
+        line.remove(0, 3);
+    } else if (line.startsWith("C2:")) {
+        channel = 2;
+        line.remove(0, 3);
+    } else {
+        return;
+    }
+    if (line.length() == 0) return;
+
+    String transferId;
+    if (waitForReply) {
+        String messageType;
+        if (!jsonStringField(line, "type", messageType)
+            || messageType != "SYNC_END"
+            || !jsonStringField(line, "id", transferId)
+            || transferId.length() == 0) {
+            Serial.println("[GW1] invalid C2W sync frame");
+            return;
         }
-        while (LoRa.available()) out += (char)LoRa.read();
-        Serial.println(out);
+    } else if (channel == 2) {
+        jsonStringField(line, "id", transferId);
+    }
+    beginTransmit(line, channel, waitForReply, transferId);
+}
+
+void serviceSerialInput() {
+    while (Serial.available()) {
+        const char c = static_cast<char>(Serial.read());
+        if (c == '\r') continue;
+        if (c == '\n') {
+            if (serialLineTooLong) {
+                Serial.println("[GW1] SERIAL_FRAME_TOO_LONG");
+            } else if (serialLine.length() > 0) {
+                if (pendingCommand.length() == 0) pendingCommand = serialLine;
+                else if (queuedCommand.length() == 0) queuedCommand = serialLine;
+                else Serial.println("[GW1] SERIAL_COMMAND_QUEUE_FULL");
+            }
+            serialLine = "";
+            serialLineTooLong = false;
+        } else if (serialLine.length() < SERIAL_LINE_MAX) {
+            serialLine += c;
+        } else {
+            serialLineTooLong = true;
+        }
+    }
+}
+
+void serviceGateReceive() {
+    const int packetSize = LoRa.parsePacket();
+    if (packetSize <= 0) return;
+    String out = "C1:" + String(LoRa.packetRssi()) + "," +
+                 String(LoRa.packetSnr(), 1) + ":";
+    while (LoRa.available()) out += static_cast<char>(LoRa.read());
+    Serial.println(out);
+    radioState = CH1_GATE_SERVICE;
+}
+
+void setup() {
+    Serial.begin(115200);
+    delay(500);
+    radioReady = initializeRadio(1);
+    if (!radioReady) {
+        radioState = RADIO_RECOVERY;
+        recoveryAttempts = 0;
+        recoveryNextAt = millis() + RADIO_RECOVERY_RETRY_DELAY_MS;
+        Serial.print("[GW1] INITIAL_RADIO_INIT_FAILED retry_ms=");
+        Serial.println(RADIO_RECOVERY_RETRY_DELAY_MS);
+    } else {
+        Serial.println("[GW1] ready on CH1 433.1 MHz; CH2 433.5 MHz, SF7");
+    }
+}
+
+void loop() {
+    serviceSerialInput();
+    switch (radioState) {
+        case CH2_SYNC_TX:
+            if (radioTxComplete ||
+                millis() - txStartedAt >= RADIO_TX_TIMEOUT_MS) {
+                serviceTransmit();
+            }
+            break;
+        case CH1_GATE_SERVICE:
+            if (txPayload.length() > 0) {
+                if (radioTxComplete ||
+                    millis() - txStartedAt >= RADIO_TX_TIMEOUT_MS) {
+                    serviceTransmit();
+                }
+            } else if (radioReady) {
+                serviceGateReceive();
+            }
+            break;
+        case CH2_ACK_WAIT:
+            serviceAckWait();
+            break;
+        case RADIO_RECOVERY:
+            recoverRadio();
+            break;
+        case RADIO_RECOVERY_PENDING:
+            if (static_cast<long>(millis() - recoveryNextAt) >= 0) {
+                recoveryAttempts = 0;
+                recoveryNextAt = millis();
+                radioState = RADIO_RECOVERY;
+            }
+            break;
+        case CH1_GATE_LISTEN:
+            if (radioReady) serviceGateReceive();
+            break;
+    }
+    if (pendingCommand.length() == 0 && queuedCommand.length() > 0) {
+        pendingCommand = queuedCommand;
+        queuedCommand = "";
+    }
+    if ((radioState == CH1_GATE_LISTEN || radioState == CH1_GATE_SERVICE)
+        && pendingCommand.length() > 0 && txPayload.length() == 0) {
+        const String command = pendingCommand;
+        pendingCommand = "";
+        startCommand(command);
     }
 }

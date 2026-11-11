@@ -22,14 +22,14 @@ MAX_BATCH_EVENTS = 256
 MAX_CHUNKS = (MAX_BATCH_BYTES + CHUNK_BYTES - 1) // CHUNK_BYTES
 MAX_LORA_PAYLOAD_BYTES = 255
 BAUD = 115200
-SF = 12
+SF = 7
 BANDWIDTH_HZ = 125000
 CODING_RATE_INDEX = 1
 PREAMBLE_SYMBOLS = 8
-CRC_ENABLED = False
+CRC_ENABLED = True
 IMPLICIT_HEADER = False
-FIRMWARE_ACK_WINDOW_SEC = 15
-SERIAL_REPLY_MARGIN_SEC = 1
+FIRMWARE_ACK_WINDOW_SEC = 1
+SERIAL_REPLY_MARGIN_SEC = 0.75
 FRAME_GUARD_SEC = 0.25
 TABLES = {
     "vehicles": "updated_at",
@@ -307,9 +307,9 @@ class SyncPublisher:
                 {"type", "id"}):
             return False
         if (self.transfer_id is not None
-                and message.get("type") == "SYNC_TX_ERROR"
+                and message.get("type") in ("SYNC_TX_ERROR", "SYNC_TIMEOUT")
                 and message.get("id") == self.transfer_id):
-            print(f"[SYNC-TX] gateway TX failed for {self.transfer_id}; retrying")
+            print(f"[SYNC-TX] gateway radio failure for {self.transfer_id}; retrying")
             self.awaiting_ack = True
             self.ack_deadline = time.monotonic()
             self.next_frame_at = self.ack_deadline
@@ -325,6 +325,10 @@ class SyncPublisher:
             print(f"[SYNC-TX] acknowledged {self.transfer_id}")
         elif ack_result == "negative":
             print(f"[SYNC-TX] receiver rejected {self.transfer_id}: {message.get('error', '')}")
+            self.awaiting_ack = True
+            self.ack_deadline = time.monotonic()
+            self.next_frame_at = self.ack_deadline
+            return True
         else:
             return False
         self._clear_transfer(time.monotonic())

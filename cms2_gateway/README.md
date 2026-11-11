@@ -92,6 +92,11 @@ Every command and response is one newline-terminated line:
 - No reply within the wait period: send `C2:TIMEOUT` to the host.
 - Any LoRa payload received outside a wait: send `C2:<payload>` to the host.
 
+LoRa TX is asynchronous with a 1500 ms completion timeout. A timed-out
+transmission triggers radio reinitialization and at most one retransmission;
+repeated failures emit `C2:TX_ERROR` and a diagnostic line. Serial input and
+reply polling remain non-blocking while the radio is transmitting or waiting.
+
 The CMS2 Linux host should run
 `~/vvs/lora/lora_sync_client.py` while the gateway is connected. See
 `cms1-deploy-kit/README-CMS1.md` for deployment instructions.
