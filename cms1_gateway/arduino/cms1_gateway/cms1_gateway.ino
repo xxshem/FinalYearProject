@@ -62,13 +62,14 @@ void reportSyncTxError(const String& transferId) {
 void applyChannel(int ch) {
     LoRa.idle();
     LoRa.setFrequency(ch == 1 ? FREQ_CH1 : FREQ_CH2);
-    LoRa.setSpreadingFactor(12);
+    LoRa.setSpreadingFactor(7);
     LoRa.setSignalBandwidth(125E3);
     LoRa.setCodingRate4(5);
     LoRa.setPreambleLength(8);
     LoRa.setSyncWord(0x12);
-    LoRa.disableCrc();
+    LoRa.enableCrc();
     LoRa.disableInvertIQ();
+    LoRa.setTxPower(2);
     currentCh = ch;
 }
 
@@ -82,15 +83,15 @@ void setup() {
         Serial.println("[GW1] LoRa init failed");
         while (1) delay(1000);
     }
-    LoRa.setSpreadingFactor(12);
+    LoRa.setSpreadingFactor(7);
     LoRa.setSignalBandwidth(125E3);
     LoRa.setCodingRate4(5);
-    LoRa.setTxPower(20);
+    LoRa.setTxPower(2);
     LoRa.setPreambleLength(8);
     LoRa.setSyncWord(0x12);
-    LoRa.disableCrc();
+    LoRa.enableCrc();
     LoRa.disableInvertIQ();
-    Serial.println("[GW1] ready on CH1 433.1 MHz; CH2 433.5 MHz, SF12");
+    Serial.println("[GW1] ready on CH1 433.1 MHz; CH2 433.5 MHz, SF7");
 }
 
 void switchTo(int ch) {

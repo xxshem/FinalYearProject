@@ -44,13 +44,13 @@ void setup() {
         Serial.println("[GW2] init failed");
         while (1) delay(1000);
     }
-    LoRa.setSpreadingFactor(12);
+    LoRa.setSpreadingFactor(7);
     LoRa.setSignalBandwidth(125E3);
     LoRa.setCodingRate4(5);
-    LoRa.setTxPower(20);
+    LoRa.setTxPower(2);
     LoRa.setPreambleLength(8);
     LoRa.setSyncWord(0x12);
-    LoRa.disableCrc();
+    LoRa.enableCrc();
     LoRa.disableInvertIQ();
     Serial.println("[GW2] ready on 433.5 MHz");
 }
