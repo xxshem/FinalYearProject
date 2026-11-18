@@ -1,5 +1,11 @@
 # CMS1–CMS2 Synchronization Protocol
 
+> Historical protocol snapshot. Its radio profile, airtime and timing values
+> describe the implementation when this document was written. For current
+> radio settings, use [RADIO_CONFIGURATION.md](RADIO_CONFIGURATION.md) and the
+> active firmware sources; this document preserves its original protocol
+> evidence.
+
 ## Scope and wire profile
 
 CMS1 publishes a point-in-time database mirror to CMS2 over the CH2 LoRa link.

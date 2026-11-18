@@ -4,6 +4,7 @@ import base64
 import hashlib
 import json
 import os
+import signal
 import sys
 import time
 
@@ -12,14 +13,26 @@ import serial
 VVS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, VVS_DIR)
 from scripts.reconciliation import reconcile_blob
+from scripts.sync_limits import (
+    CHUNK_BYTES, MAX_BATCH_BYTES, MAX_CHUNKS)
 
 SERIAL_PORT = os.environ.get("VVS_SERIAL_PORT", "").strip()
 BAUD = 115200
-MAX_BATCH_BYTES = 4 * 1024
 MAX_TRANSFER_BYTES = MAX_BATCH_BYTES
-CHUNK_BYTES = 100
-MAX_CHUNKS = (MAX_BATCH_BYTES + CHUNK_BYTES - 1) // CHUNK_BYTES
 SERIAL_ERRORS = (getattr(serial, "SerialException", OSError), OSError)
+_radio_stats_requested = False
+_radio_stats_response_deadline = None
+
+
+def _request_radio_stats(signum, frame):
+    global _radio_stats_requested
+    _radio_stats_requested = True
+
+
+def _install_radio_stats_handler():
+    signal_number = getattr(signal, "SIGUSR1", None)
+    if signal_number is not None:
+        signal.signal(signal_number, _request_radio_stats)
 
 
 class SyncReceiver:
@@ -83,6 +96,8 @@ class SyncReceiver:
                                  for index in range(transfer["chunks"]))
                 if len(blob) != transfer["size"]:
                     raise ValueError("size mismatch")
+                if len(blob) > MAX_BATCH_BYTES:
+                    raise ValueError("transfer exceeds maximum batch size")
                 if hashlib.sha256(blob).hexdigest() != transfer["sha256"]:
                     raise ValueError("checksum mismatch")
                 data = json.loads(
@@ -112,6 +127,8 @@ class SyncReceiver:
 
 
 def main():
+    global _radio_stats_requested, _radio_stats_response_deadline
+    _install_radio_stats_handler()
     receiver = SyncReceiver()
     if not SERIAL_PORT:
         raise SystemExit("[SYNC-RX] VVS_SERIAL_PORT must be configured")
@@ -123,6 +140,15 @@ def main():
                 print(f"[SYNC-RX] connected to {SERIAL_PORT} at {BAUD} baud")
                 while True:
                     try:
+                        if _radio_stats_requested and receiver.transfer is None:
+                            ser.write(b"STATS?\n")
+                            _radio_stats_requested = False
+                            _radio_stats_response_deadline = time.monotonic() + 2.0
+                            print("[SYNC-RX] radio stats query sent")
+                        if (_radio_stats_response_deadline is not None and
+                                time.monotonic() >= _radio_stats_response_deadline):
+                            print("[SYNC-RX] radio stats query timed out")
+                            _radio_stats_response_deadline = None
                         raw_bytes = ser.readline()
                         if raw_bytes:
                             retry_delay = 1
@@ -145,6 +171,19 @@ def _process_serial_line(raw_bytes, receiver, ser):
         print(f"[SYNC-RX] ignored non-UTF-8 serial frame: {len(raw_bytes)} bytes")
         return
     if not raw:
+        return
+    if raw.startswith("STATS:"):
+        global _radio_stats_response_deadline
+        _radio_stats_response_deadline = None
+        try:
+            stats = json.loads(raw[6:], object_pairs_hook=_unique_object)
+        except (json.JSONDecodeError, ValueError):
+            print("[SYNC-RX] ignored malformed radio stats frame")
+            return
+        if not isinstance(stats, dict) or stats.get("type") != "RADIO_STATS":
+            print("[SYNC-RX] ignored invalid radio stats frame")
+            return
+        print("[SYNC-RX] radio stats " + json.dumps(stats, sort_keys=True))
         return
     if raw.startswith("C2:"):
         raw = raw[3:]

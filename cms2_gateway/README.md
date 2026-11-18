@@ -7,12 +7,19 @@ CMS1 Raspberry Pi over LoRa CH2. It uses an ESP8266 NodeMCU v3 and an
 Ai-Thinker SX1278 RF LoRa PM1280 module, which operates in the 433 MHz band.
 
 - CH2 frequency: **433.5 MHz**
-- Spreading factor: **SF12**
+- Spreading factor: **SF7**
 - Bandwidth: **125 kHz**
 - Coding rate: **4/5**
-- Transmit power: **20 dBm**
+- Preamble: **8 symbols**
+- Sync word: **`0x12`**
+- CRC: **enabled**
+- IQ: **normal (inversion disabled)**
+- Transmit power: **2 dBm**
+- SPI clock: **4 MHz**
 
-Use a 433 MHz antenna and ensure the CMS1 gateway uses the same CH2 profile.
+Use a 433 MHz antenna and ensure CMS1 uses the same CH2 profile. The
+authoritative source settings and physical-device limitation are recorded in
+[`RADIO_CONFIGURATION.md`](../RADIO_CONFIGURATION.md).
 
 ## Wiring: SX1278 to NodeMCU v3
 
@@ -67,6 +74,9 @@ errors and reconnects with bounded backoff if the device is unavailable.
 Log out and back in for the group change to apply.
 
 ## Build, upload, and monitor
+
+The tested PlatformIO versions and clean-build commands are recorded in
+[`BUILD_ENVIRONMENT.md`](../BUILD_ENVIRONMENT.md).
 
 From this directory:
 

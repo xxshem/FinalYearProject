@@ -10,11 +10,16 @@
 #define LORA_RST   16
 #define LORA_DIO0  4
 #define FREQ_CH2   433.5E6
+#define RADIO_SPI_HZ 4E6
 #define RADIO_TX_TIMEOUT_MS 1500
 #define RADIO_REPLY_TIMEOUT_MS 2000
 #define RADIO_RECOVERY_RETRIES 2
 #define RADIO_TX_ATTEMPTS 2
 #define SERIAL_LINE_MAX 512
+
+#define SX127X_REG_IRQ_FLAGS 0x12
+#define SX127X_IRQ_RX_DONE 0x40
+#define SX127X_IRQ_CRC_ERROR 0x20
 
 enum RadioState {
     RADIO_READY,
@@ -23,9 +28,20 @@ enum RadioState {
     RADIO_RECOVERY
 };
 
+struct RadioCounters {
+    uint32_t rx_packets;
+    uint32_t crc_errors;
+    uint32_t rx_timeouts;
+    uint32_t tx_success;
+    uint32_t tx_failures;
+    uint32_t tx_timeouts;
+};
+
 RadioState radioState = RADIO_READY;
 bool radioReady = false;
 volatile bool radioTxComplete = false;
+RadioCounters ch2Counters = {};
+bool countersSaturated = false;
 String serialLine;
 String pendingCommand;
 bool serialLineTooLong = false;
@@ -36,6 +52,54 @@ uint8_t recoveryAttempts = 0;
 unsigned long txStartedAt = 0;
 unsigned long replyDeadline = 0;
 unsigned long recoveryNextAt = 0;
+
+void incrementCounter(uint32_t& counter) {
+    if (counter == UINT32_MAX) {
+        countersSaturated = true;
+        return;
+    }
+    ++counter;
+}
+
+uint8_t readRadioIrqFlags() {
+    SPI.beginTransaction(SPISettings(RADIO_SPI_HZ, MSBFIRST, SPI_MODE0));
+    digitalWrite(LORA_SS, LOW);
+    SPI.transfer(SX127X_REG_IRQ_FLAGS);
+    const uint8_t flags = SPI.transfer(0);
+    digitalWrite(LORA_SS, HIGH);
+    SPI.endTransaction();
+    return flags;
+}
+
+int parseRadioPacket() {
+    const uint8_t flags = readRadioIrqFlags();
+    const int packetSize = LoRa.parsePacket();
+    if ((flags & (SX127X_IRQ_RX_DONE | SX127X_IRQ_CRC_ERROR)) ==
+        (SX127X_IRQ_RX_DONE | SX127X_IRQ_CRC_ERROR)) {
+        incrementCounter(ch2Counters.crc_errors);
+    } else if (packetSize > 0) {
+        incrementCounter(ch2Counters.rx_packets);
+    }
+    return packetSize;
+}
+
+void reportRadioStats() {
+    Serial.print("STATS:{\"type\":\"RADIO_STATS\",\"reset\":\"boot\",\"saturated\":");
+    Serial.print(countersSaturated ? "true" : "false");
+    Serial.print(",\"ch2\":{\"rx_packets\":");
+    Serial.print(ch2Counters.rx_packets);
+    Serial.print(",\"crc_errors\":");
+    Serial.print(ch2Counters.crc_errors);
+    Serial.print(",\"rx_timeouts\":");
+    Serial.print(ch2Counters.rx_timeouts);
+    Serial.print(",\"tx_success\":");
+    Serial.print(ch2Counters.tx_success);
+    Serial.print(",\"tx_failures\":");
+    Serial.print(ch2Counters.tx_failures);
+    Serial.print(",\"tx_timeouts\":");
+    Serial.print(ch2Counters.tx_timeouts);
+    Serial.println("}}");
+}
 
 void configureRadio() {
     LoRa.setSpreadingFactor(7);
@@ -54,6 +118,7 @@ void handleRadioTxDone() {
 
 bool initializeRadio() {
     LoRa.setPins(LORA_SS, LORA_RST, LORA_DIO0);
+    LoRa.setSPIFrequency(RADIO_SPI_HZ);
     if (!LoRa.begin(FREQ_CH2)) return false;
     configureRadio();
     LoRa.onTxDone(handleRadioTxDone);
@@ -79,13 +144,19 @@ void startRecovery() {
 }
 
 void startTransmitAttempt() {
-    if (!radioReady || !LoRa.beginPacket()) {
+    if (!radioReady) {
+        startRecovery();
+        return;
+    }
+    if (!LoRa.beginPacket()) {
+        incrementCounter(ch2Counters.tx_failures);
         startRecovery();
         return;
     }
     LoRa.print(txPayload);
     radioTxComplete = false;
     if (!LoRa.endPacket(true)) {
+        incrementCounter(ch2Counters.tx_failures);
         startRecovery();
         return;
     }
@@ -147,11 +218,14 @@ void recoverRadio() {
 void serviceTransmit() {
     if (!radioTxComplete) {
         if (millis() - txStartedAt >= RADIO_TX_TIMEOUT_MS) {
+            incrementCounter(ch2Counters.tx_timeouts);
+            incrementCounter(ch2Counters.tx_failures);
             Serial.println("[GW2] RADIO_TX_TIMEOUT");
             startRecovery();
         }
         return;
     }
+    incrementCounter(ch2Counters.tx_success);
     if (waitForReply) {
         replyDeadline = millis() + RADIO_REPLY_TIMEOUT_MS;
         radioState = RADIO_REPLY_WAIT;
@@ -162,7 +236,7 @@ void serviceTransmit() {
 }
 
 void serviceReplyWait() {
-    const int packetSize = LoRa.parsePacket();
+    const int packetSize = parseRadioPacket();
     if (packetSize > 0) {
         Serial.print("C2:");
         while (LoRa.available()) Serial.write(static_cast<uint8_t>(LoRa.read()));
@@ -171,6 +245,7 @@ void serviceReplyWait() {
         waitForReply = false;
         radioState = RADIO_READY;
     } else if (static_cast<long>(millis() - replyDeadline) >= 0) {
+        incrementCounter(ch2Counters.rx_timeouts);
         Serial.println("C2:TIMEOUT");
         txPayload = "";
         waitForReply = false;
@@ -230,7 +305,7 @@ void loop() {
             break;
         case RADIO_READY:
             if (radioReady) {
-                const int packetSize = LoRa.parsePacket();
+                const int packetSize = parseRadioPacket();
                 if (packetSize > 0) {
                     Serial.print("C2:");
                     while (LoRa.available()) Serial.write(static_cast<uint8_t>(LoRa.read()));
@@ -239,7 +314,10 @@ void loop() {
             }
             break;
     }
-    if (radioState == RADIO_READY && pendingCommand.length() > 0) {
+    if (pendingCommand == "STATS?") {
+        pendingCommand = "";
+        reportRadioStats();
+    } else if (radioState == RADIO_READY && pendingCommand.length() > 0) {
         const String command = pendingCommand;
         pendingCommand = "";
         beginCommand(command);

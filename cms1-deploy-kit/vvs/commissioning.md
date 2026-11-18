@@ -20,15 +20,17 @@ SECTION 0 — PRE-FLIGHT CHECKLIST  (5 min before demo)
 ═══════════════════════════════════════════════════════════════════════════════
 
 Hardware in place:
-[ ] Gate node (ESP32-CAM + SX1278 + PCF8574 + LCD + LEDs + buzzer) — powered on
-[ ] Gate node antenna attached
+[ ] Gate A node (ESP32-CAM + ESP-12E/SX1278 + LCD + indicators) — built as GATE_A
+[ ] Gate C node (same hardware) — built as GATE_C
+[ ] (Optional clone demo) Gate B node — built as GATE_B
+[ ] Both gate antennas attached
 [ ] CMS1 gateway (ESP32 Dev + SX1278) — plugged into Pi USB
 [ ] CMS1 gateway antenna attached
 [ ] CMS1 (Raspberry Pi) — powered on, connected to WiFi
 [ ] CMS2 gateway (ESP32 Dev + SX1278) — plugged into PC USB
 [ ] CMS2 gateway antenna attached
 [ ] CMS2 (Linux PC) — powered on, connected to WiFi
-[ ] Dev PC — plugged into gate node via USB (for serial commands)
+[ ] Dev PC — available to build/flash gate firmware with the bridge UART disconnected
 [ ] Printed QR code for the test vehicle — in hand
 
 Software running (check CMS1 via SSH):
@@ -45,7 +47,7 @@ Terminal windows open and visible:
 [ ] Window A — CMS1 SSH: tail of listener log
 [ ] Window B — CMS2 SSH: tail of sync client log (optional, for cross-CMS demo)
 [ ] Window C — Browser: CMS1 dashboard /logs page
-[ ] Window D — Dev PC: PlatformIO serial monitor on gate node
+[ ] Window D — Dev PC: PlatformIO terminal (only needed if gate firmware must be reflashed)
 
 ═══════════════════════════════════════════════════════════════════════════════
 SECTION 1 — PRE-DEMO DATA SETUP  (2 min)
@@ -110,37 +112,39 @@ Step 1.4 — Start live log tails
 [ ] Window C (browser) shows http://<CMS1-IP>:5000/logs
 
 ═══════════════════════════════════════════════════════════════════════════════
-SECTION 2 — FIRMWARE STATE VERIFICATION  (1 min)
+SECTION 2 — BUILD AND FLASH GATE IDS  (before connecting gate nodes)
 ═══════════════════════════════════════════════════════════════════════════════
 
-Step 2.1 — Open serial monitor on gate node
+Step 2.1 — Build each gate with its fixed ID
 
-  Window D (Dev PC terminal):
-  $ cd C:\Users\User\esp32-projects\gate_node
-  $ pio device monitor
+  In the project `gate_node` directory:
 
-  Expected boot banner (if not already booted, press reset on gate node):
+  Gate A:
+  $ pio run -e esp32cam
 
-    [GATE] booting
-    [QR] camera ready (ESP32QRCodeReader)
-    [LORA] ready on 433.1 MHz
-    [GATE] ready
+  Gate C:
+  $ pio run -e gate_c
 
-[ ] Boot banner confirmed
-[ ] LCD shows "Ready / Scan QR code"
+`GATE_ID_VALUE` is a compile-time firmware value. The build rejects values
+outside `GATE_[A-Z]`; CMS1 must also have the selected ID registered in its
+`gates` table. Never use a serial command to change gate identity.
 
-Step 2.2 — Confirm starting gate ID
+Step 2.2 — Flash each matching build
 
-  In the serial monitor, type:
-  WHOAMI
+Before flashing, disconnect the ESP32-CAM/bridge UART wires and connect the
+programming adapter. For Gate A:
 
-  Expected:
-    [GATE] current GATE_ID = GATE_A
+  $ pio run -e esp32cam -t upload
 
-  Expected LCD: "Gate ID / GATE_A" for 1.5 s, then back to Ready.
+For Gate C:
 
-[ ] GATE_ID confirmed as GATE_A
-[ ] LCD acknowledged
+  $ pio run -e gate_c -t upload
+
+Reconnect the bridge and reset each node after flashing. The compiled gate ID
+is constant in firmware and survives normal resets and power cycles.
+
+[ ] Gate A has the `esp32cam` build; Gate C has the `gate_c` build
+[ ] Both nodes show their normal ready state on their displays
 
 ═══════════════════════════════════════════════════════════════════════════════
 SECTION 3 — LIVE DEMONSTRATION
@@ -161,47 +165,28 @@ Observed on gate node hardware:
 [ ] Green LED lit for ~1.5 s
 [ ] Buzzer sounded single short beep
 
-Observed in Serial Monitor (Window D):
-[ ] [QR] decoded: <payload>
-[ ] [GATE] token: <token>
-[ ] [LORA] tx XX bytes
-[ ] [RF] RSSI=XX SNR=XX.X
-[ ] [GATE] reply: {"granted":true,...,"action":"entry"}
-
 Observed in Window A (CMS1 listener):
-[ ] [CMS1] GATE_A -> granted=True (entry at GATE_A)
+[ ] [CMS1] GATE_A granted=True action=entry reason=
+[ ] `verification_logs.gate_id` for this scan is `GATE_A`
 
 Observed in Window C (browser /logs):
 [ ] New row: DEMO 001 | GATE_A | granted | <timestamp>
 
 Time of entry (write): __________:__________
 
-── ACTION 2 ── SWITCH GATE IDENTITY TO GATE_C ────────────────────────────────
+── ACTION 2 ── EXIT AT THE SEPARATELY BUILT GATE_C ────────────────────────────
 
-Narration: "We now reassign the same physical node to represent a different
-            gate on campus — the hostel gate — without reflashing."
+Narration: "The vehicle now leaves through a second physical gate. Its
+            firmware was built with the fixed identity GATE_C."
 
 Action:
-[ ] In the serial monitor, type:
-    SET_GATE=GATE_C
-
-Expected on Serial Monitor:
-[ ] [GATE] GATE_ID now = GATE_C
-
-Expected on LCD:
-[ ] "Gate ID set / GATE_C" for 1.5 s, then back to "Ready / Scan QR code"
-
-Verification:
-[ ] Type: WHOAMI
-[ ] Confirms: [GATE] current GATE_ID = GATE_C
-
-Time of switch (write): __________:__________
+[ ] Move to Gate C
 
 ── ACTION 3 ── WAIT FOR CLONE WINDOW TO CLEAR ────────────────────────────────
 
 Narration: "The system treats back-to-back scans within 5 seconds as
             a possible clone attempt. We wait 7 seconds to allow a
-            legitimate exit."
+            legitimate exit at the second gate."
 
 Action:
 [ ] Wait 7 full seconds (count slowly, or use a stopwatch)
@@ -210,13 +195,10 @@ Action:
 
 Time exit begins (write): __________:__________
 
-── ACTION 4 ── EXIT AT GATE_C ────────────────────────────────────────────────
-
-Narration: "The same vehicle now leaves campus through the hostel gate.
-            Note this is a DIFFERENT gate from the one it entered."
+── ACTION 4 ── EXIT AT GATE_C ───────────────────────────────────────────────
 
 Action:
-[ ] Scan the same QR code again
+[ ] Scan the same QR code at Gate C
 
 Observed on LCD:
 [ ] "Checking..."
@@ -225,13 +207,9 @@ Observed on LCD:
 Observed on hardware:
 [ ] Green LED + single beep
 
-Observed in Serial Monitor:
-[ ] [QR] decoded
-[ ] [LORA] tx
-[ ] [GATE] reply: {"granted":true,...,"action":"exit"}
-
 Observed in Window A (CMS1 listener):
-[ ] [CMS1] GATE_C -> granted=True (exit from GATE_A, X.XX min on campus)
+[ ] [CMS1] GATE_C granted=True action=exit reason=
+[ ] `verification_logs.gate_id` for this scan is `GATE_C`
 
 Observed in Window C (browser /logs):
 [ ] Two new rows total: GATE_A (entry) and GATE_C (exit)
@@ -240,27 +218,20 @@ Time of exit (write): __________:__________
 
 Calculated duration on campus: __________ min
 
-── ACTION 5 ── SWITCH GATE IDENTITY BACK TO GATE_A ──────────────────────────
+── ACTION 5 ── RE-ENTRY AT THE SEPARATELY BUILT GATE_A ───────────────────────
 
-Narration: "Vehicle returns to campus later the same day."
+Narration: "The vehicle returns later through Gate A, whose firmware retains
+            its GATE_A identity across resets."
 
 Action:
-[ ] In serial monitor, type:
-    SET_GATE=GATE_A
-
-Expected:
-[ ] [GATE] GATE_ID now = GATE_A
-[ ] LCD acknowledges
-
-Verification:
-[ ] WHOAMI shows GATE_A
+[ ] Return to Gate A
 
 ── ACTION 6 ── RE-ENTRY AT GATE_A ────────────────────────────────────────────
 
 Narration: "The vehicle comes back in through the main entrance."
 
 Action:
-[ ] Wait 2–3 seconds after the SET_GATE command (to avoid duplicate-scan guard)
+[ ] Wait 7+ seconds after the exit scan (to avoid the duplicate-scan guard)
 [ ] Scan the QR code again
 
 Observed:
@@ -353,14 +324,14 @@ SECTION 5 — CLONE DETECTION (OPTIONAL BONUS DEMO)
 This demonstrates anti-fraud in action. Run only if the primary demo passed.
 
 Setup:
-[ ] Ensure GATE_ID = GATE_A (WHOAMI)
+[ ] Use the physical Gate A node built as GATE_A
 [ ] Vehicle currently OUTSIDE (after step 4, it's inside — first scan below
     will be an exit, then scan again immediately)
 
 Action 1:
 [ ] Scan QR (registers exit at GATE_A)
 [ ] Wait 1 second
-[ ] Change gate ID: SET_GATE=GATE_B
+[ ] Move to the separate Gate B node built as GATE_B
 [ ] Scan QR within 5 seconds of the previous scan
 
 Expected on this second scan:
@@ -380,7 +351,6 @@ Expected: one row with text "clone suspected: also entered at GATE_A ..."
 [ ] Clone alert recorded
 
 Cleanup:
-[ ] SET_GATE=GATE_A
 [ ] Delete test vehicle if desired:
     $ python3 add_test_data.py summary  (confirm before deleting)
 
@@ -412,9 +382,10 @@ Problem: Clone alert triggered during legit exit
   → You scanned within 5 seconds of the entry
   → Wait longer (7+ seconds) between entry and exit
 
-Problem: "SET_GATE" command ignored
-  → Confirm exact format: SET_GATE=GATE_C  (no spaces, capital GATE)
-  → Serial line ending must be Newline or CR+LF
+Problem: CMS1 reports the wrong gate ID
+  → Check which PlatformIO environment was used to build and flash that node
+  → Rebuild/flash the matching environment with the bridge UART disconnected
+  → Reset the node, then scan again and verify the CMS1 log/database value
 
 Problem: Two rows in entry_exit but no exit_gate on first
   → The exit was denied as a clone
@@ -428,8 +399,7 @@ Demo completed at: __________:__________
 
 Summary of results:
 [ ] Entry at GATE_A — recorded successfully
-[ ] SET_GATE changed identity at runtime without reflash
-[ ] Exit at GATE_C — recorded successfully (any-gate exit PROVEN)
+[ ] Separate GATE_C build reported its ID and recorded the exit
 [ ] Re-entry at GATE_A — recorded successfully
 [ ] Database state machine verified (2+ rows, correct gates, duration)
 [ ] CMS2 mirror received synced rows

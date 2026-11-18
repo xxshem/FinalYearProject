@@ -1,5 +1,11 @@
 # ACK Release-Blocker Corrections
 
+> Historical implementation snapshot. Its radio profile, airtime and timeout
+> values are not the current source baseline. Use
+> [RADIO_CONFIGURATION.md](RADIO_CONFIGURATION.md) and the active firmware for
+> current settings; this report preserves the findings made at its recorded
+> baseline.
+
 ## Status and scope
 
 These corrections are on `ack-stabilization-20261107`, based on `ack`. The

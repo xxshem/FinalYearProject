@@ -14,12 +14,11 @@ VVS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, VVS_DIR)
 from scripts.config import DB_PATH
 from scripts.init_db import SYNC_TABLES, init_sync_tracking
+from scripts.sync_limits import (
+    CHUNK_BYTES, MAX_BATCH_BYTES, MAX_CHUNKS, MAX_SYNC_RECORD_BYTES)
 
 INTERVAL_SEC = 30
-CHUNK_BYTES = 100
-MAX_BATCH_BYTES = 4 * 1024
 MAX_BATCH_EVENTS = 256
-MAX_CHUNKS = (MAX_BATCH_BYTES + CHUNK_BYTES - 1) // CHUNK_BYTES
 MAX_LORA_PAYLOAD_BYTES = 255
 BAUD = 115200
 SF = 7
@@ -94,6 +93,7 @@ class SyncPublisher:
         self.awaiting_ack = False
         self.ack_deadline = 0.0
         self.retries = 0
+        self._reported_quarantines = set()
 
     def _read_checkpoint(self):
         if not os.path.exists(self.db_path):
@@ -142,25 +142,47 @@ class SyncPublisher:
             payload["_deletes"] = deletes
         return payload
 
-    def _record_oversized_row(self, table, row_key, byte_size):
-        message = (f"unsynchronized {table} primary key {row_key}: "
-                   f"serialized change exceeds {MAX_BATCH_BYTES} bytes "
+    def _record_oversized_row(self, table, row_key, record_json, byte_size):
+        message = (f"serialized record exceeds {MAX_SYNC_RECORD_BYTES} bytes "
                    f"({byte_size} bytes)")
         connection = sqlite3.connect(self.db_path)
         try:
             connection.execute("""
                 INSERT INTO sync_errors (table_name, row_key, message,
+                                          serialized_bytes, record_json,
                                           created_at, resolved_at)
-                VALUES (?, ?, ?, CURRENT_TIMESTAMP, NULL)
+                VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, NULL)
                 ON CONFLICT(table_name, row_key) DO UPDATE SET
                     message=excluded.message,
+                    serialized_bytes=excluded.serialized_bytes,
+                    record_json=excluded.record_json,
                     created_at=CURRENT_TIMESTAMP,
                     resolved_at=NULL
-            """, (table, str(row_key), message))
+                WHERE sync_errors.message IS NOT excluded.message
+                   OR sync_errors.serialized_bytes IS NOT excluded.serialized_bytes
+                   OR sync_errors.record_json IS NOT excluded.record_json
+            """, (table, str(row_key), message, byte_size, record_json))
             connection.commit()
         finally:
             connection.close()
-        print(f"[SYNC-TX][ERROR] {message}; no watermark advanced")
+        self._report_unresolved_quarantines()
+
+    def _report_unresolved_quarantines(self):
+        connection = sqlite3.connect(self.db_path)
+        try:
+            rows = connection.execute("""
+                SELECT table_name, row_key, message, created_at
+                FROM sync_errors WHERE resolved_at IS NULL
+            """).fetchall()
+        finally:
+            connection.close()
+        for table, row_key, message, created_at in rows:
+            key = (table, row_key, message, created_at)
+            if key in self._reported_quarantines:
+                continue
+            print(f"[SYNC-TX][QUARANTINED] {table} primary key {row_key}: "
+                  f"{message}; original record retained in sync_errors")
+            self._reported_quarantines.add(key)
 
     def _next_batch(self):
         if not self._sync_tracking_ready:
@@ -174,7 +196,7 @@ class SyncPublisher:
         accepted_blob = None
         accepted_keys = []
         accepted_events = 0
-        oversized = None
+        oversized = []
         result = None
         try:
             connection.execute("BEGIN")
@@ -191,21 +213,34 @@ class SyncPublisher:
                 key = (table, row_key)
                 if table not in PRIMARY_KEYS:
                     raise ValueError(f"unknown table in sync journal: {table}")
-                previous = changes.get(key)
+                previous_changes = changes.copy()
                 changes[key] = entry["operation"]
+                record_json = None
+                record_size = 0
+                if entry["operation"] == "upsert":
+                    primary_key = PRIMARY_KEYS[table]
+                    row = connection.execute(
+                        f'SELECT * FROM "{table}" WHERE "{primary_key}"=?',
+                        (row_key,)).fetchone()
+                    if row is not None:
+                        record_json = json.dumps(
+                            dict(row), separators=(",", ":"), default=str,
+                            ensure_ascii=False)
+                        record_size = len(record_json.encode("utf-8"))
+                        if record_size > MAX_SYNC_RECORD_BYTES:
+                            oversized.append(
+                                (table, row_key, record_json, record_size))
+                            changes.pop(key, None)
+                            continue
+
                 payload = self._serialize_batch(
                     connection, self.watermark, entry["seq"], changes)
                 blob = json.dumps(
-                    payload, separators=(",", ":"), default=str
+                    payload, separators=(",", ":"), default=str,
+                    ensure_ascii=False
                 ).encode("utf-8")
                 if len(blob) > MAX_BATCH_BYTES:
-                    changes.pop(key, None)
-                    if previous is not None:
-                        changes[key] = previous
-                    if accepted_events == 0:
-                        if entry["operation"] == "upsert":
-                            oversized = (table, row_key, len(blob))
-                        break
+                    changes = previous_changes
                     break
                 accepted_seq = entry["seq"]
                 accepted_blob = blob
@@ -216,8 +251,9 @@ class SyncPublisher:
         finally:
             connection.rollback()
             connection.close()
-        if oversized:
-            self._record_oversized_row(*oversized)
+        for quarantined in oversized:
+            self._record_oversized_row(*quarantined)
+        self._report_unresolved_quarantines()
         return result
 
     def _build_transfer(self, now):
@@ -227,6 +263,22 @@ class SyncPublisher:
             return
 
         self.candidate_seq, blob, self.candidate_keys = batch
+        payload = json.loads(blob.decode("utf-8"))
+        for table, rows in payload.items():
+            if table not in TABLES:
+                continue
+            primary_key = PRIMARY_KEYS[table]
+            for row in rows:
+                record_json = json.dumps(
+                    row, separators=(",", ":"), default=str, ensure_ascii=False)
+                record_size = len(record_json.encode("utf-8"))
+                if record_size > MAX_SYNC_RECORD_BYTES:
+                    self._record_oversized_row(
+                        table, row[primary_key], record_json, record_size)
+                    self.next_poll = now + INTERVAL_SEC
+                    return
+        if len(blob) > MAX_BATCH_BYTES:
+            raise ValueError(f"serialized sync batch exceeds {MAX_BATCH_BYTES} bytes")
         transfer_id = uuid.uuid4().hex
         chunks = [blob[offset:offset + CHUNK_BYTES]
                   for offset in range(0, len(blob), CHUNK_BYTES)]
@@ -361,10 +413,24 @@ class SyncPublisher:
             """, (str(candidate_seq),))
             connection.execute(
                 "DELETE FROM sync_change_log WHERE seq <= ?", (candidate_seq,))
-            connection.executemany("""
-                UPDATE sync_errors SET resolved_at=CURRENT_TIMESTAMP
-                WHERE table_name=? AND row_key=? AND resolved_at IS NULL
-            """, ((table, str(row_key)) for table, row_key in candidate_keys))
+            for table, row_key in candidate_keys:
+                primary_key = PRIMARY_KEYS[table]
+                row = connection.execute(
+                    f'SELECT * FROM "{table}" WHERE "{primary_key}"=?',
+                    (row_key,)).fetchone()
+                if row is not None:
+                    record_json = json.dumps(
+                        dict(zip(
+                            [column[1] for column in connection.execute(
+                                f'PRAGMA table_info("{table}")')],
+                            row)),
+                        separators=(",", ":"), default=str, ensure_ascii=False)
+                    if len(record_json.encode("utf-8")) > MAX_SYNC_RECORD_BYTES:
+                        continue
+                connection.execute("""
+                    UPDATE sync_errors SET resolved_at=CURRENT_TIMESTAMP
+                    WHERE table_name=? AND row_key=? AND resolved_at IS NULL
+                """, (table, str(row_key)))
             connection.commit()
         except Exception:
             connection.rollback()

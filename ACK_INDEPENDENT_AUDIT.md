@@ -1,5 +1,10 @@
 # ACK Stabilization Independent Technical Audit
 
+> Historical audit snapshot. Its radio profile, airtime and timeout values
+> describe the audited source at that time, not the current firmware baseline.
+> Use [RADIO_CONFIGURATION.md](RADIO_CONFIGURATION.md) and active firmware for
+> current settings; this report preserves its original audit evidence.
+
 ## A. Overall assessment
 
 **Overall: REQUIRES ADDITIONAL SOFTWARE CORRECTIONS.**

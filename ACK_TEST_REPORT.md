@@ -1,5 +1,10 @@
 # ACK Stabilization Test Report
 
+> Historical test snapshot. Its radio profile, airtime and timeout values are
+> not the current source baseline. Use [RADIO_CONFIGURATION.md](RADIO_CONFIGURATION.md)
+> and active firmware for current settings; this report preserves the results
+> for its recorded source.
+
 ## Scope
 
 Validation is performed on `ack-stabilization-20261107`, based on `ack`. No

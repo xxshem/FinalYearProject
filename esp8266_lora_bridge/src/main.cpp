@@ -12,6 +12,7 @@
 #define LCD_ADDR        0x27
 #define OUTPUTS_ADDR    0x20
 #define RADIO_FREQ    433.1E6
+#define RADIO_SPI_HZ     4E6
 #define UART_BAUD      9600
 #define RADIO_TIMEOUT_MS 6000
 #define RADIO_TX_TIMEOUT_MS 1500
@@ -23,6 +24,9 @@
 #define PCF_LED_GREEN 0
 #define PCF_LED_RED   1
 #define PCF_BUZZER    2
+#define SX127X_REG_IRQ_FLAGS 0x12
+#define SX127X_IRQ_RX_DONE 0x40
+#define SX127X_IRQ_CRC_ERROR 0x20
 
 enum FeedbackStage {
     FEEDBACK_IDLE,
@@ -34,14 +38,55 @@ enum FeedbackStage {
     REJECTED_WAIT
 };
 
+struct RadioCounters {
+    uint32_t rx_packets;
+    uint32_t crc_errors;
+    uint32_t rx_timeouts;
+    uint32_t tx_success;
+    uint32_t tx_failures;
+    uint32_t tx_timeouts;
+};
+
 LiquidCrystal_I2C lcd(LCD_ADDR, 16, 2);
 String uartLine;
 bool uartLineTooLong = false;
 bool radioReady = false;
 volatile bool radioTxComplete = false;
+RadioCounters ch1Counters = {};
+bool countersSaturated = false;
 FeedbackStage feedbackStage = FEEDBACK_IDLE;
 unsigned long feedbackDeadline = 0;
 unsigned long lastUartByteAt = 0;
+
+void incrementCounter(uint32_t& counter) {
+    if (counter == UINT32_MAX) {
+        countersSaturated = true;
+        return;
+    }
+    ++counter;
+}
+
+uint8_t readRadioIrqFlags() {
+    SPI.beginTransaction(SPISettings(RADIO_SPI_HZ, MSBFIRST, SPI_MODE0));
+    digitalWrite(LORA_NSS, LOW);
+    SPI.transfer(SX127X_REG_IRQ_FLAGS);
+    const uint8_t flags = SPI.transfer(0);
+    digitalWrite(LORA_NSS, HIGH);
+    SPI.endTransaction();
+    return flags;
+}
+
+int parseRadioPacket() {
+    const uint8_t flags = readRadioIrqFlags();
+    const int packetSize = LoRa.parsePacket();
+    if ((flags & (SX127X_IRQ_RX_DONE | SX127X_IRQ_CRC_ERROR)) ==
+        (SX127X_IRQ_RX_DONE | SX127X_IRQ_CRC_ERROR)) {
+        incrementCounter(ch1Counters.crc_errors);
+    } else if (packetSize > 0) {
+        incrementCounter(ch1Counters.rx_packets);
+    }
+    return packetSize;
+}
 
 void sendBridgeError(const char* error) {
     Serial.print("ERR:");
@@ -211,7 +256,7 @@ void handleRadioTxDone() {
 
 bool initializeRadio() {
     LoRa.setPins(LORA_NSS, LORA_RESET, LORA_DIO0);
-    LoRa.setSPIFrequency(4E6);
+    LoRa.setSPIFrequency(RADIO_SPI_HZ);
     if (!LoRa.begin(RADIO_FREQ)) {
         radioReady = false;
         return false;
@@ -233,6 +278,7 @@ bool transmitRequest(const String& payload, bool& timedOut) {
 
         LoRa.idle();
         if (!LoRa.beginPacket()) {
+            incrementCounter(ch1Counters.tx_failures);
             Serial.print("[BRIDGE] RADIO_TX_START_FAILURE attempt=");
             Serial.println(attempt);
             LoRa.end();
@@ -242,6 +288,7 @@ bool transmitRequest(const String& payload, bool& timedOut) {
         LoRa.print(payload);
         radioTxComplete = false;
         if (!LoRa.endPacket(true)) {
+            incrementCounter(ch1Counters.tx_failures);
             Serial.print("[BRIDGE] RADIO_TX_START_FAILURE attempt=");
             Serial.println(attempt);
             LoRa.end();
@@ -255,9 +302,14 @@ bool transmitRequest(const String& payload, bool& timedOut) {
             serviceFeedback();
             delay(1);
         }
-        if (radioTxComplete) return true;
+        if (radioTxComplete) {
+            incrementCounter(ch1Counters.tx_success);
+            return true;
+        }
 
         timedOut = true;
+        incrementCounter(ch1Counters.tx_timeouts);
+        incrementCounter(ch1Counters.tx_failures);
         Serial.print("[BRIDGE] RADIO_TX_TIMEOUT attempt=");
         Serial.println(attempt);
         LoRa.end();
@@ -317,7 +369,7 @@ void handleRequest(const String& line) {
     const unsigned long started = millis();
     while (millis() - started < RADIO_TIMEOUT_MS) {
         serviceFeedback();
-        const int packetSize = LoRa.parsePacket();
+        const int packetSize = parseRadioPacket();
         if (packetSize > 0) {
             String response;
             while (LoRa.available()) response += static_cast<char>(LoRa.read());
@@ -328,6 +380,7 @@ void handleRequest(const String& line) {
         delay(1);
     }
 
+    incrementCounter(ch1Counters.rx_timeouts);
     sendRequestError(requestBoot, static_cast<uint16_t>(requestSeq), "TIMEOUT");
 }
 

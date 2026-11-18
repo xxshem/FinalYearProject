@@ -3,13 +3,16 @@
 Reconciliation engine (LWW) with clone-alert escalation.
 CMS2 uses this to merge incoming CMS1 sync payloads.
 """
+import json
 import sqlite3
 from datetime import datetime, timedelta
 
 try:
     from .config import DB_PATH as DB
+    from .sync_limits import MAX_BATCH_BYTES, MAX_SYNC_RECORD_BYTES
 except ImportError:
     from config import DB_PATH as DB
+    from sync_limits import MAX_BATCH_BYTES, MAX_SYNC_RECORD_BYTES
 
 TIMESTAMP_COL = {
     "vehicles":            "updated_at",
@@ -69,6 +72,12 @@ def _parse_ts(v):
 def _validate_blob(blob, connection):
     if not isinstance(blob, dict):
         raise ValueError("transfer root must be an object")
+    serialized_blob = json.dumps(
+        blob, separators=(",", ":"), default=str, ensure_ascii=False
+    ).encode("utf-8")
+    if len(serialized_blob) > MAX_BATCH_BYTES:
+        raise ValueError(
+            f"sync batch exceeds maximum size of {MAX_BATCH_BYTES} bytes")
 
     metadata = blob.get("_sync")
     if metadata is not None:
@@ -107,6 +116,13 @@ def _validate_blob(blob, connection):
                 raise ValueError(f"{table} rows must be objects")
             if not row or not set(row).issubset(columns):
                 raise ValueError(f"{table} row contains unknown or no columns")
+            serialized_record = json.dumps(
+                row, separators=(",", ":"), default=str, ensure_ascii=False
+            ).encode("utf-8")
+            if len(serialized_record) > MAX_SYNC_RECORD_BYTES:
+                raise ValueError(
+                    f"{table} record {row.get(PK_COL[table], '<missing>')} "
+                    f"exceeds {MAX_SYNC_RECORD_BYTES} bytes")
             if pk_col not in row or row[pk_col] is None or ts_col not in row:
                 raise ValueError(f"{table} row is missing its key or timestamp")
             if type(row[pk_col]) is not PK_TYPE[table]:

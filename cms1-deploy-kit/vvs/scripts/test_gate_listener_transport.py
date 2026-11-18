@@ -6,7 +6,10 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import redirect_stdout
 from datetime import datetime, timedelta
+from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
@@ -40,6 +43,64 @@ class SerialLine:
 
 
 class GateListenerTransportTests(unittest.TestCase):
+    def test_radio_stats_line_is_separated_from_radio_packets(self):
+        stats = {"type": "RADIO_STATS", "reset": "boot", "saturated": False}
+
+        channel, payload, metrics = gate_listener.parse_tagged_line(
+            "STATS:" + json.dumps(stats) + "\n")
+
+        self.assertEqual(channel, 3)
+        self.assertEqual(json.loads(payload), stats)
+        self.assertIsNone(metrics)
+
+    def test_verification_response_within_limit_is_serialized_as_utf8(self):
+        response = {
+            "type": "VERIFY_RESP", "granted": True, "reason": "",
+            "reg": "Café", "action": "entry", "boot": 55, "seq": 12,
+        }
+
+        serialized = gate_listener.serialize_verify_response(response, "GATE_A")
+
+        self.assertEqual(json.loads(serialized), response)
+        self.assertEqual(serialized, json.dumps(
+            response, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
+        self.assertLessEqual(len(serialized), gate_listener.MAX_LORA_PAYLOAD_BYTES)
+
+    def test_verification_response_at_limit_is_not_replaced(self):
+        response = {
+            "type": "VERIFY_RESP", "granted": True, "reason": "",
+            "reg": "", "action": "entry", "boot": 55, "seq": 12,
+        }
+        base_size = len(json.dumps(
+            response, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
+        response["reg"] = "X" * (gate_listener.MAX_LORA_PAYLOAD_BYTES - base_size)
+
+        serialized = gate_listener.serialize_verify_response(response, "GATE_A")
+
+        self.assertEqual(len(serialized), gate_listener.MAX_LORA_PAYLOAD_BYTES)
+        self.assertEqual(json.loads(serialized), response)
+
+    def test_oversized_verification_response_becomes_logged_denial(self):
+        response = {
+            "type": "VERIFY_RESP", "granted": True, "reason": "",
+            "reg": "車" * 100, "action": "entry", "response_time_ms": 1.0,
+            "boot": 55, "seq": 12,
+        }
+        diagnostic = StringIO()
+
+        with redirect_stdout(diagnostic):
+            serialized = gate_listener.serialize_verify_response(response, "GATE_A")
+
+        replacement = json.loads(serialized)
+        self.assertFalse(replacement["granted"])
+        self.assertEqual(replacement["error"], "response_too_large")
+        self.assertEqual(replacement["reason"], "response_too_large")
+        self.assertEqual(replacement["reg"], "")
+        self.assertEqual(replacement["response_time_ms"], 1.0)
+        self.assertEqual((replacement["boot"], replacement["seq"]), (55, 12))
+        self.assertLessEqual(len(serialized), gate_listener.MAX_LORA_PAYLOAD_BYTES)
+        self.assertIn("oversized VERIFY_RESP gate=GATE_A", diagnostic.getvalue())
+
     def test_response_echoes_request_identity(self):
         response = {"type": "VERIFY_RESP", "granted": True}
         request = {"boot": 1234, "seq": 7}
@@ -76,6 +137,176 @@ class GateListenerTransportTests(unittest.TestCase):
         self.assertEqual(channel, 2)
         self.assertEqual(payload, '{"type":"SYNC_BEGIN"}')
         self.assertIsNone(metrics)
+
+    def test_serial_reader_reassembles_split_frames(self):
+        class SplitSerial:
+            parts = [b"C1:{\"type\":\"VERIFY_REQ\"", b"}\n"]
+
+            def readline(self):
+                return self.parts.pop(0)
+
+        reader = gate_listener.SerialFrameReader()
+        connection = SplitSerial()
+
+        self.assertEqual(reader.read_tagged(connection), (None, None, None))
+        channel, payload, metrics = reader.read_tagged(connection)
+
+        self.assertEqual(channel, 1)
+        self.assertEqual(json.loads(payload), {"type": "VERIFY_REQ"})
+        self.assertIsNone(metrics)
+
+    def test_serial_reader_discards_partial_frame_after_timeout(self):
+        class SplitSerial:
+            parts = [b"C1:{\"type\":", b"VERIFY_REQ\"}\n"]
+
+            def readline(self):
+                return self.parts.pop(0)
+
+        reader = gate_listener.SerialFrameReader()
+        connection = SplitSerial()
+        with patch.object(gate_listener.time, "monotonic", side_effect=[0.0, 2.0, 2.0]):
+            self.assertEqual(reader.read_tagged(connection), (None, None, None))
+            channel, payload, _metrics = reader.read_tagged(connection)
+
+        self.assertIsNone(channel)
+        self.assertIsNone(payload)
+
+
+class SerialReconnectionTests(unittest.TestCase):
+    class StopLoop(BaseException):
+        pass
+
+    class ConnectedSerial:
+        def reset_input_buffer(self):
+            pass
+
+        def readline(self):
+            raise SerialReconnectionTests.StopLoop()
+
+        def close(self):
+            pass
+
+    class DisconnectAfterConnectSerial(ConnectedSerial):
+        def readline(self):
+            raise OSError("adapter disappeared after reconnect")
+
+    def test_missing_device_retries_with_capped_backoff_and_resets_after_connect(self):
+        clock = [0.0]
+        sleeps = []
+
+        def sleep(seconds):
+            sleeps.append(seconds)
+            clock[0] += seconds
+
+        def monotonic():
+            return clock[0]
+
+        open_results = [OSError("absent") for _ in range(7)]
+        open_results.extend([
+            self.DisconnectAfterConnectSerial(),
+            self.ConnectedSerial(),
+        ])
+        with patch.object(gate_listener, "init_database"), \
+                patch.object(gate_listener, "SyncPublisher", return_value=object()), \
+                patch.object(gate_listener.serial, "Serial",
+                             side_effect=open_results, create=True) as open_serial, \
+                patch.object(gate_listener.time, "sleep", side_effect=sleep), \
+                patch.object(gate_listener.time, "monotonic", side_effect=monotonic), \
+                redirect_stdout(StringIO()):
+            with self.assertRaises(self.StopLoop):
+                gate_listener.main()
+
+        self.assertEqual(open_serial.call_count, 9)
+        self.assertEqual(sleeps, [1, 2, 4, 8, 16, 30, 30,
+                                  gate_listener.SERIAL_SETTLE_SEC, 1,
+                                  gate_listener.SERIAL_SETTLE_SEC])
+
+    def test_read_failure_closes_connection_and_reopens_device(self):
+        clock = [0.0]
+        sleeps = []
+
+        class ReadFailureSerial:
+            closed = False
+
+            def reset_input_buffer(self):
+                pass
+
+            def readline(self):
+                raise OSError("USB disconnected")
+
+            def close(self):
+                self.closed = True
+
+        failed_connection = ReadFailureSerial()
+        def sleep(seconds):
+            sleeps.append(seconds)
+            clock[0] += seconds
+
+        with patch.object(gate_listener, "init_database"), \
+                patch.object(gate_listener, "SyncPublisher", return_value=object()), \
+                patch.object(gate_listener.serial, "Serial",
+                             side_effect=[failed_connection, self.ConnectedSerial()],
+                             create=True) as open_serial, \
+                patch.object(gate_listener.time, "sleep", side_effect=sleep), \
+                patch.object(gate_listener.time, "monotonic",
+                             side_effect=lambda: clock[0]), \
+                redirect_stdout(StringIO()):
+            with self.assertRaises(self.StopLoop):
+                gate_listener.main()
+
+        self.assertEqual(open_serial.call_count, 2)
+        self.assertTrue(failed_connection.closed)
+        self.assertEqual(sleeps, [gate_listener.SERIAL_SETTLE_SEC, 1,
+                                  gate_listener.SERIAL_SETTLE_SEC])
+
+    def test_write_failure_after_commit_is_recoverable(self):
+        clock = [0.0]
+        sleeps = []
+        request = {
+            "type": "VERIFY_REQ", "gate": "GATE_A", "boot": 55, "seq": 12,
+            "payload": "vehicle|token|signature",
+        }
+
+        class WriteFailureSerial:
+            closed = False
+
+            def reset_input_buffer(self):
+                pass
+
+            def readline(self):
+                return ("C1:" + json.dumps(request) + "\n").encode()
+
+            def write(self, _data):
+                raise OSError("USB disconnected during response")
+
+            def close(self):
+                self.closed = True
+
+        failed_connection = WriteFailureSerial()
+        def sleep(seconds):
+            sleeps.append(seconds)
+            clock[0] += seconds
+
+        with patch.object(gate_listener, "init_database"), \
+                patch.object(gate_listener, "SyncPublisher", return_value=object()), \
+                patch.object(gate_listener, "verify_and_authorize", return_value={
+                    "type": "VERIFY_RESP", "granted": True, "reason": "",
+                    "reg": "TEST", "action": "entry", "response_time_ms": 1.0,
+                }), \
+                patch.object(gate_listener.serial, "Serial",
+                             side_effect=[failed_connection, self.ConnectedSerial()],
+                             create=True) as open_serial, \
+                patch.object(gate_listener.time, "sleep", side_effect=sleep), \
+                patch.object(gate_listener.time, "monotonic",
+                             side_effect=lambda: clock[0]), \
+                redirect_stdout(StringIO()):
+            with self.assertRaises(self.StopLoop):
+                gate_listener.main()
+
+        self.assertEqual(open_serial.call_count, 2)
+        self.assertTrue(failed_connection.closed)
+        self.assertEqual(sleeps, [gate_listener.SERIAL_SETTLE_SEC, 1,
+                                  gate_listener.SERIAL_SETTLE_SEC])
 
 
 class ReconciliationAtomicityTests(unittest.TestCase):
@@ -252,7 +483,6 @@ class ReconciliationAtomicityTests(unittest.TestCase):
 
 class GateAuthorizationTests(unittest.TestCase):
     def setUp(self):
-        gate_listener.REQUEST_CACHE.clear()
         self.previous_secret = os.environ.get("VVS_QR_SECRET")
         os.environ["VVS_QR_SECRET"] = "test-only-qr-secret"
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -296,10 +526,34 @@ class GateAuthorizationTests(unittest.TestCase):
         self.assertEqual(result["reason"], "invalid QR signature")
 
     def test_same_sequence_retry_returns_original_decision(self):
-        first = gate_listener.verify_and_authorize(self.payload, "GATE_A", "GATE_A:7")
-        retry = gate_listener.verify_and_authorize(self.payload, "GATE_A", "GATE_A:7")
+        identity = (1234, 7)
+        first = gate_listener.verify_and_authorize(self.payload, "GATE_A", identity)
+        retry = gate_listener.verify_and_authorize(self.payload, "GATE_A", identity)
 
         self.assertEqual(first, retry)
+        connection = sqlite3.connect(self.db_path)
+        try:
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM entry_exit").fetchone()[0], 1)
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM verification_logs").fetchone()[0], 1)
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM verification_request_receipts").fetchone()[0], 1)
+        finally:
+            connection.close()
+
+    def test_reused_identity_with_different_payload_is_rejected(self):
+        identity = (1234, 8)
+        original = gate_listener.verify_and_authorize(self.payload, "GATE_A", identity)
+
+        conflict = gate_listener.verify_and_authorize(
+            "vehicle-1|different-token|different-signature", "GATE_A", identity)
+
+        self.assertTrue(original["granted"])
+        self.assertFalse(conflict["granted"])
+        self.assertEqual(conflict["reason"],
+                         "request identity reused with different payload")
+        self.assertEqual((conflict["boot"], conflict["seq"]), identity)
         connection = sqlite3.connect(self.db_path)
         try:
             self.assertEqual(connection.execute(
@@ -309,9 +563,66 @@ class GateAuthorizationTests(unittest.TestCase):
         finally:
             connection.close()
 
+    def test_sequence_wrap_uses_new_boot_identity(self):
+        before_wrap = gate_listener.verify_and_authorize(
+            self.payload, "GATE_A", (1234, 0xFFFF))
+        after_wrap = gate_listener.verify_and_authorize(
+            self.payload, "GATE_A", (1235, 0))
+
+        self.assertTrue(before_wrap["granted"])
+        self.assertEqual(after_wrap["boot"], 1235)
+        connection = sqlite3.connect(self.db_path)
+        try:
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM verification_request_receipts").fetchone()[0], 2)
+        finally:
+            connection.close()
+
+    def test_concurrent_duplicate_requests_apply_one_transition(self):
+        identity = (1234, 9)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(
+                lambda _unused: gate_listener.verify_and_authorize(
+                    self.payload, "GATE_A", identity),
+                range(2)))
+
+        self.assertEqual(results[0], results[1])
+        connection = sqlite3.connect(self.db_path)
+        try:
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM entry_exit").fetchone()[0], 1)
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM verification_logs").fetchone()[0], 1)
+        finally:
+            connection.close()
+
+    def test_receipt_failure_rolls_back_vehicle_transition(self):
+        connection = sqlite3.connect(self.db_path)
+        try:
+            connection.execute("""CREATE TRIGGER reject_request_receipt
+                BEFORE INSERT ON verification_request_receipts
+                BEGIN SELECT RAISE(ABORT, 'receipt unavailable'); END""")
+            connection.commit()
+        finally:
+            connection.close()
+
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "receipt unavailable"):
+            gate_listener.verify_and_authorize(self.payload, "GATE_A", (1234, 10))
+
+        connection = sqlite3.connect(self.db_path)
+        try:
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM entry_exit").fetchone()[0], 0)
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM verification_logs").fetchone()[0], 0)
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM verification_request_receipts").fetchone()[0], 0)
+        finally:
+            connection.close()
+
     def test_verification_persists_radio_and_operational_metrics(self):
         result = gate_listener.verify_and_authorize(
-            self.payload, "GATE_A", "GATE_A:telemetry",
+            self.payload, "GATE_A", (1234, 11),
             {"rssi_dbm": -85.0, "snr_db": 8.5})
 
         self.assertTrue(result["granted"])
@@ -328,6 +639,46 @@ class GateAuthorizationTests(unittest.TestCase):
         self.assertEqual(operational[0], "GATE_A")
         self.assertGreaterEqual(operational[1], 0)
         self.assertGreaterEqual(operational[2], 0)
+
+    def test_oversized_success_is_denied_atomically_and_duplicate_is_stable(self):
+        connection = sqlite3.connect(self.db_path)
+        try:
+            connection.execute(
+                "UPDATE vehicles SET registration_no=? WHERE vid=?",
+                ("R" * 300, "vehicle-1"))
+            connection.commit()
+        finally:
+            connection.close()
+
+        identity = (1234, 12)
+        with redirect_stdout(StringIO()):
+            first = gate_listener.verify_and_authorize(
+                self.payload, "GATE_A", identity)
+            retry = gate_listener.verify_and_authorize(
+                self.payload, "GATE_A", identity)
+
+        self.assertEqual(first, retry)
+        self.assertFalse(first["granted"])
+        self.assertEqual(first["reason"], "response_too_large")
+        self.assertEqual(first["error"], "response_too_large")
+        self.assertLessEqual(
+            len(json.dumps(first, separators=(",", ":"), ensure_ascii=False).encode("utf-8")),
+            gate_listener.MAX_LORA_PAYLOAD_BYTES)
+        connection = sqlite3.connect(self.db_path)
+        try:
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM entry_exit").fetchone()[0], 0)
+            log = connection.execute(
+                "SELECT verification_result, denial_reason FROM verification_logs"
+            ).fetchone()
+            self.assertEqual(log, ("denied", "response_too_large"))
+            receipt = connection.execute(
+                """SELECT response_json FROM verification_request_receipts
+                   WHERE gate_id='GATE_A' AND boot_id=1234 AND sequence_number=12"""
+            ).fetchone()
+            self.assertEqual(json.loads(receipt[0]), first)
+        finally:
+            connection.close()
 
     def test_detects_clone_then_allows_exit_and_reentry(self):
         first = gate_listener.verify_and_authorize(self.payload, "GATE_A")
@@ -384,6 +735,52 @@ class DatabaseMigrationTests(unittest.TestCase):
                 """).fetchone())
             finally:
                 connection.close()
+
+    def test_existing_sync_error_table_migrates_for_record_quarantine(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db_path = Path(directory) / "legacy.db"
+            schema_path = Path(__file__).resolve().parents[1] / "database" / "schema.sql"
+            connection = sqlite3.connect(db_path)
+            try:
+                connection.executescript(schema_path.read_text(encoding="utf-8"))
+                connection.execute("""CREATE TABLE sync_errors (
+                    table_name TEXT NOT NULL, row_key TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    resolved_at TEXT, PRIMARY KEY (table_name, row_key))""")
+                connection.commit()
+            finally:
+                connection.close()
+
+            init_db.init_sync_tracking(str(db_path))
+            connection = sqlite3.connect(db_path)
+            try:
+                error_columns = {
+                    row[1] for row in connection.execute(
+                        "PRAGMA table_info(sync_errors)")
+                }
+                self.assertIn("serialized_bytes", error_columns)
+                self.assertIn("record_json", error_columns)
+                connection.execute("""INSERT INTO vehicles
+                    (vid, owner_name, registration_no, vehicle_type, qr_token,
+                     valid_from, valid_to, is_active)
+                    VALUES ('legacy', ?, 'LEGACY-1', 'car', 'legacy-token',
+                            '2026-01-01', '2027-01-01', 1)""",
+                    ("x" * (lora_sync_server.MAX_SYNC_RECORD_BYTES + 100),))
+                connection.commit()
+                diagnostic = connection.execute("""SELECT serialized_bytes,
+                    length(record_json), message FROM sync_errors
+                    WHERE table_name='vehicles' AND row_key='1'""").fetchone()
+                journaled = connection.execute("""SELECT COUNT(*)
+                    FROM sync_change_log
+                    WHERE table_name='vehicles' AND row_key='1'""").fetchone()[0]
+            finally:
+                connection.close()
+
+        self.assertIsNotNone(diagnostic)
+        self.assertGreater(diagnostic[0], lora_sync_server.MAX_SYNC_RECORD_BYTES)
+        self.assertIn("exceeds", diagnostic[2])
+        self.assertEqual(journaled, 0)
 
     def test_new_schema_declares_foreign_keys_and_indexes(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -493,6 +890,18 @@ class DatabaseMigrationTests(unittest.TestCase):
 
 
 class SyncProtocolTests(unittest.TestCase):
+    def test_cms2_radio_stats_line_is_logged_not_reconciled(self):
+        stats = {"type": "RADIO_STATS", "reset": "boot", "saturated": False}
+        output = StringIO()
+
+        with redirect_stdout(output):
+            lora_sync_client._process_serial_line(
+                ("STATS:" + json.dumps(stats) + "\n").encode(),
+                lora_sync_client.SyncReceiver(), SerialLine(""))
+
+        self.assertIn("radio stats", output.getvalue())
+        self.assertIn('"type": "RADIO_STATS"', output.getvalue())
+
     def test_shared_firmware_python_ack_vectors(self):
         vectors_path = (Path(__file__).resolve().parents[3]
                         / "cms1_gateway" / "test" / "ack_protocol_vectors.json")
@@ -957,13 +1366,22 @@ class SyncBatchingTests(unittest.TestCase):
             lora_sync_server.SyncPublisher(str(self.source_db)).watermark,
             committed_seq)
 
-    def test_oversized_record_persists_diagnostic_without_skipping(self):
+    def test_oversized_record_is_quarantined_without_blocking_later_records(self):
         self.add_vehicle(31, "oversized-" + "z" * 6000)
+        self.add_vehicle(33, "supported after quarantine")
         publisher = lora_sync_server.SyncPublisher(str(self.source_db))
 
-        publisher._build_transfer(0)
+        diagnostic_output = StringIO()
+        with redirect_stdout(diagnostic_output):
+            publisher._build_transfer(0)
 
         self.assertTrue(publisher.frames)
+        self.assertIn("[SYNC-TX][QUARANTINED] vehicles primary key 31",
+                      diagnostic_output.getvalue())
+        payload = self.payload_from(publisher)
+        self.assertIn("vehicles", payload)
+        self.assertEqual(
+            [row["vehicle_id"] for row in payload["vehicles"]], [33])
         receiver = lora_sync_client.SyncReceiver()
         ack = self.deliver(receiver, publisher)
         self.assertTrue(ack["ok"])
@@ -972,18 +1390,141 @@ class SyncBatchingTests(unittest.TestCase):
         publisher._build_transfer(100)
 
         self.assertFalse(publisher.frames)
+        self.assertGreater(last_acknowledged, 0)
         self.assertEqual(publisher.watermark, last_acknowledged)
         connection = sqlite3.connect(self.source_db)
         try:
             diagnostic = connection.execute("""
-                SELECT table_name, row_key, message, resolved_at
+                SELECT table_name, row_key, message, serialized_bytes,
+                       record_json, resolved_at
                 FROM sync_errors WHERE table_name='vehicles' AND row_key='31'
             """).fetchone()
+            journal_rows = connection.execute("""
+                SELECT COUNT(*) FROM sync_change_log
+                WHERE table_name='vehicles' AND row_key='31'
+            """).fetchone()[0]
         finally:
             connection.close()
         self.assertEqual(diagnostic[0:2], ("vehicles", "31"))
         self.assertIn("exceeds", diagnostic[2])
-        self.assertIsNone(diagnostic[3])
+        self.assertGreater(diagnostic[3], lora_sync_server.MAX_SYNC_RECORD_BYTES)
+        self.assertGreater(len(diagnostic[4].encode("utf-8")),
+                           lora_sync_server.MAX_SYNC_RECORD_BYTES)
+        self.assertIsNone(diagnostic[5])
+        self.assertEqual(journal_rows, 0)
+        connection = sqlite3.connect(self.destination_db)
+        try:
+            self.assertIsNone(connection.execute(
+                "SELECT 1 FROM vehicles WHERE vehicle_id=31").fetchone())
+            self.assertIsNotNone(connection.execute(
+                "SELECT 1 FROM vehicles WHERE vehicle_id=33").fetchone())
+        finally:
+            connection.close()
+
+    def test_maximum_supported_record_synchronizes(self):
+        self.add_vehicle(34, "")
+        connection = sqlite3.connect(self.source_db)
+        try:
+            row = dict(zip(
+                [column[1] for column in connection.execute(
+                    "PRAGMA table_info(vehicles)")],
+                connection.execute(
+                    "SELECT * FROM vehicles WHERE vehicle_id=34").fetchone()))
+            base_size = len(json.dumps(
+                row, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
+            owner_name = "m" * (lora_sync_server.MAX_SYNC_RECORD_BYTES - base_size)
+            connection.execute(
+                "UPDATE vehicles SET owner_name=? WHERE vehicle_id=34",
+                (owner_name,))
+            connection.commit()
+            row = dict(zip(
+                [column[1] for column in connection.execute(
+                    "PRAGMA table_info(vehicles)")],
+                connection.execute(
+                    "SELECT * FROM vehicles WHERE vehicle_id=34").fetchone()))
+            self.assertEqual(len(json.dumps(
+                row, separators=(",", ":"), ensure_ascii=False).encode("utf-8")),
+                lora_sync_server.MAX_SYNC_RECORD_BYTES)
+            self.assertIsNone(connection.execute("""
+                SELECT 1 FROM sync_errors
+                WHERE table_name='vehicles' AND row_key='34'
+                  AND resolved_at IS NULL
+            """).fetchone())
+        finally:
+            connection.close()
+
+        publisher = lora_sync_server.SyncPublisher(str(self.source_db))
+        publisher._build_transfer(0)
+        batch = b"".join(
+            base64.b64decode(frame["data"]) for frame in publisher.frames[1:-1])
+        self.assertLessEqual(len(batch), lora_sync_server.MAX_BATCH_BYTES)
+        self.assertLessEqual(len(publisher.frames) - 2,
+                             lora_sync_server.MAX_CHUNKS)
+        receiver = lora_sync_client.SyncReceiver()
+        ack = self.deliver(receiver, publisher)
+        self.assertTrue(ack["ok"])
+        self.assertTrue(self.acknowledge(publisher, ack["ok"]))
+        connection = sqlite3.connect(self.destination_db)
+        try:
+            mirrored_owner = connection.execute(
+                "SELECT owner_name FROM vehicles WHERE vehicle_id=34"
+            ).fetchone()[0]
+            self.assertEqual(mirrored_owner, owner_name)
+        finally:
+            connection.close()
+
+    def test_cms2_rejects_oversized_record_before_database_changes(self):
+        self.add_vehicle(35, "r" * (
+            lora_sync_server.MAX_SYNC_RECORD_BYTES + 100))
+        connection = sqlite3.connect(self.source_db)
+        try:
+            row = dict(zip(
+                [column[1] for column in connection.execute(
+                    "PRAGMA table_info(vehicles)")],
+                connection.execute(
+                    "SELECT * FROM vehicles WHERE vehicle_id=35").fetchone()))
+        finally:
+            connection.close()
+        with self.assertRaisesRegex(ValueError, "record 35 exceeds"):
+            reconciliation.reconcile_blob({"vehicles": [row]})
+        connection = sqlite3.connect(self.destination_db)
+        try:
+            self.assertIsNone(connection.execute(
+                "SELECT 1 FROM vehicles WHERE vehicle_id=35").fetchone())
+        finally:
+            connection.close()
+
+    def test_publisher_revalidates_legacy_journal_before_continuing(self):
+        self.add_vehicle(36, "Initially supported")
+        connection = sqlite3.connect(self.source_db)
+        try:
+            connection.execute(
+                "UPDATE vehicles SET owner_name=? WHERE vehicle_id=36",
+                ("changed beyond limit " +
+                 "q" * lora_sync_server.MAX_SYNC_RECORD_BYTES,))
+            connection.commit()
+        finally:
+            connection.close()
+        self.add_vehicle(37, "later supported record")
+
+        publisher = lora_sync_server.SyncPublisher(str(self.source_db))
+        publisher._build_transfer(0)
+        payload = self.payload_from(publisher)
+
+        self.assertEqual(
+            [row["vehicle_id"] for row in payload["vehicles"]], [37])
+        receiver = lora_sync_client.SyncReceiver()
+        ack = self.deliver(receiver, publisher)
+        self.assertTrue(ack["ok"])
+        self.assertTrue(self.acknowledge(publisher, ack["ok"]))
+        connection = sqlite3.connect(self.destination_db)
+        try:
+            self.assertIsNone(connection.execute(
+                "SELECT 1 FROM vehicles WHERE vehicle_id=36").fetchone())
+            self.assertIsNotNone(connection.execute(
+                "SELECT 1 FROM vehicles WHERE vehicle_id=37").fetchone())
+        finally:
+            connection.close()
 
     def test_change_journal_captures_same_timestamp_update(self):
         self.add_vehicle(41, "Before")

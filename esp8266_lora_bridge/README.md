@@ -135,16 +135,26 @@ initialization fails, so camera and gate state remain visible on the LCD.
 ## LoRa settings
 
 - Frequency: 433.1 MHz
-- Spreading factor: SF12
+- Spreading factor: SF7
 - Bandwidth: 125 kHz
 - Coding rate: 4/5
-- TX power: 20 dBm
+- Preamble: 8 symbols
+- Sync word: `0x12`
+- CRC: enabled
+- IQ: normal (inversion disabled)
+- TX power: 2 dBm
+- SPI clock: 4 MHz
 - Reply timeout: 6 seconds
 
-All peer radios must use matching frequency and modulation parameters.
-Confirm the selected frequency and transmit power are permitted locally.
+CMS1 CH1 uses the same frequency and modulation profile. These are source
+settings, not verification of the flashed module or measured RF output; see
+[`RADIO_CONFIGURATION.md`](../RADIO_CONFIGURATION.md). Confirm the selected
+frequency and transmit power are permitted locally.
 
 ## Build and upload
+
+The tested PlatformIO versions and clean-build commands are recorded in
+[`BUILD_ENVIRONMENT.md`](../BUILD_ENVIRONMENT.md).
 
 Run in this directory:
 

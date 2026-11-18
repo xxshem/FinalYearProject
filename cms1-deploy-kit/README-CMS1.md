@@ -10,7 +10,13 @@ CMS1 is the master node. It:
 CMS1 uses one SX1278 radio. It listens continuously on CH1 and briefly switches
 to CH2 for sync frames; both gateway firmware builds must use the matching
 radio profiles included here. The CMS1 listener is the only process that opens
-the gateway serial port.
+the gateway serial port. The bridge/CMS1 CH1 and CMS1/CMS2 CH2 source profiles
+are SF7, 125 kHz, coding rate 4/5, 8-symbol preamble, CRC enabled, normal IQ,
+2 dBm, and 4 MHz SPI. See the
+[radio configuration baseline](../RADIO_CONFIGURATION.md); repository settings
+do not establish the profile of firmware already flashed on hardware.
+Build and tool versions are pinned and documented in
+[`BUILD_ENVIRONMENT.md`](../BUILD_ENVIRONMENT.md).
 
 ## What You Need
 - Raspberry Pi Zero 2 W with Raspberry Pi OS (Bookworm) on SD card
@@ -80,15 +86,22 @@ When the updated CMS1 ESP32+SX1278 gateway is plugged into the Pi:
     ls /dev/ttyUSB*
     # Usually /dev/ttyUSB0
 
-2. If different, edit `VVS_SERIAL_PORT` in `~/vvs.env`:
+2. Prefer the adapter's stable `/dev/serial/by-id/` path where available. If
+   needed, edit `VVS_SERIAL_PORT` in `~/vvs.env`:
     nano ~/vvs.env
 
 3. Restart services:
     sudo systemctl restart vvs-listener
 
+The listener reconnects automatically after serial open, read, or write failures.
+It logs attempts and backs off by 1, 2, 4, 8, 16, then 30 seconds (capped).
+Partial frames time out after one second; buffered input is cleared when a
+connection is reopened, and a retransmitted gate request is deduplicated by its
+request identity.
+
 ## Install the CMS2 Sync Receiver
 
-Flash `cms2_gateway` to the CMS2 ESP32 gateway and connect it to the CMS2 Linux
+Flash `cms2_gateway` to the CMS2 ESP8266 NodeMCU gateway and connect it to the CMS2 Linux
 host. Copy the kit and VVS files from the development PC:
 
     ssh pi@<CMS2-IP> "mkdir -p ~/cms1-deploy-kit/systemd ~/vvs"
@@ -118,17 +131,50 @@ The install script creates the mirror database and enables
     sudo systemctl status vvs-sync-client@pi --no-pager
     sudo journalctl -u vvs-sync-client@pi -f
 
-The CMS1 publisher sends independently acknowledged batches up to 4 KiB.
-CMS1 initialization adds a local change journal and durable ACK cursor; it
-tracks row changes by sequence number, including deletes, rather than relying
-on timestamps. CMS2 is initialized in mirror-only mode and does not create
-publisher journal triggers. If one record is larger than a batch, CMS1 logs
-the table and primary key and records the blocking item in the `sync_errors`
-table; it does not skip the item or advance the cursor past it.
+The CMS1 publisher sends independently acknowledged batches up to 4 KiB,
+split into 100-byte chunks. A serialized row is limited to 3 KiB, leaving room
+for batch metadata and other rows. CMS1 initialization adds a local change
+journal and durable ACK cursor; it tracks row changes by sequence number,
+including deletes, rather than relying on timestamps. CMS2 is initialized in
+mirror-only mode and does not create publisher journal triggers.
+
+Rows over 3 KiB are quarantined in CMS1's local `sync_errors` table with their
+table, primary key, serialized size, reason, and serialized snapshot. They are
+not journaled or sent. This explicit quarantine does not prevent subsequent
+supported records from syncing; an older pending oversized journal entry is
+also detected and quarantined by the publisher before it can block later
+batches. The durable cursor advances only after CMS2 acknowledges a batch;
+skipped data remains visible in `sync_errors` and is not silently discarded.
+CMS2 independently rejects oversized records and batches before applying any
+database changes.
+
+To recover, inspect unresolved items with:
+
+    sqlite3 ~/vvs/database/vvs.db "SELECT table_name, row_key, serialized_bytes, message FROM sync_errors WHERE resolved_at IS NULL;"
+
+Use the table and key to reduce or otherwise correct the source record so its
+serialized form fits within 3 KiB. The database journal will queue the
+correction; after CMS2 acknowledges it, the corresponding `sync_errors` row is
+marked resolved. The original quarantined snapshot remains available for
+diagnosis. Do not delete the source record or quarantine entry as a substitute
+for resolving the underlying data-size issue.
 
 CMS2 receives the database mirror only; its dashboard is not installed by this
 client setup. To use another Linux account, replace `pi` in the service name
 with that account name.
+
+To retrieve the CMS1 and CMS2 gateway counters without opening a second
+process on either serial port, signal the service that owns the port:
+
+    sudo systemctl kill --signal=USR1 vvs-listener
+    sudo journalctl -u vvs-listener -n 50 --no-pager
+    sudo systemctl kill --signal=USR1 vvs-sync-client@pi
+    sudo journalctl -u vvs-sync-client@pi -n 50 --no-pager
+
+The request is deferred until the corresponding host-side synchronization
+transfer is idle. Counters reset on firmware reboot and saturate rather than
+wrap. Gate-bridge statistics are counted but not currently retrievable during
+normal operation because the gate has no approved operator trigger.
 
 ## Add Test Data (Optional)
 
@@ -177,16 +223,12 @@ database. If no signing key exists, it creates one in `~/vvs.env`; keep that
 file shared with the listener service. For a local test database, set
 `VVS_DB_PATH` before running the command.
 
-Connect the ESP32-CAM scanner's USB serial adapter to the operator computer
-(this is separate from the CMS1 gateway serial port), then assign its logical
-gate before scanning:
-
-    python3 ~/vvs/scripts/set_gate.py --gate A --port /dev/ttyUSB1
-
-Scan the demo QR to record entry at `GATE_A`, then reassign and scan again to
-record an any-gate exit:
-
-    python3 ~/vvs/scripts/set_gate.py --gate B --port /dev/ttyUSB1
+Build and flash separate gate firmware images for the physical gates. For
+example, use the `esp32cam` environment for `GATE_A` and `gate_b` for `GATE_B`
+(see `gate_node/README.md` for the build and flash commands). Scan the demo QR
+at each gate; confirm the CMS1 listener logs and `verification_logs.gate_id`
+show the corresponding configured IDs. Gate IDs are compiled into firmware,
+survive ordinary reboots, and cannot be reassigned by a runtime serial command.
 
 The dashboard's `/logs`, `/lora`, and `/operational` pages refresh every five
 seconds and show the audit trail, RSSI/SNR, CMS1 processing latency, response
@@ -209,6 +251,18 @@ validate vehicle and gate references on legacy inserts/updates and prevent
 deleting referenced vehicle/gate history. `init_db.py` applies those triggers
 without dropping existing data. Existing malformed rows are not rewritten;
 back up and audit the database before deployment.
+
+CMS1 also stores each identified gate request and its original response in
+`verification_request_receipts`, in the same SQLite transaction as the vehicle
+transition. Receipts are retained indefinitely so delayed retries remain
+idempotent. Exact retries receive the stored response; reuse of an identity
+with different payload is rejected without a state transition. Since this
+protocol uses a 16-bit sequence, the gate rotates its random 32-bit boot ID
+when the sequence wraps. Reuse of a boot ID across gate restarts is still
+possible, though unlikely; identical payloads reusing the same
+gate/boot/sequence key are indistinguishable from delayed retries and receive
+the original response. Different payloads reusing a key are rejected. Do not
+delete receipt rows as routine cleanup.
 
 ## Common Commands
 

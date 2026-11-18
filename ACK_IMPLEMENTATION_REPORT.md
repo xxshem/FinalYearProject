@@ -1,5 +1,11 @@
 # ACK Stabilization Implementation Report
 
+> Historical implementation snapshot. Its radio profile, airtime and timeout
+> values are not the current source baseline. Use
+> [RADIO_CONFIGURATION.md](RADIO_CONFIGURATION.md) and the active firmware for
+> current settings; this report preserves the findings made at its recorded
+> baseline.
+
 ## Baseline and safety
 
 - Implementation baseline: `ack` commit `6d10a1d08d6ff0daf25f8e9d2ddf68754e34a034`.

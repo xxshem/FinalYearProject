@@ -37,6 +37,18 @@ CREATE TABLE IF NOT EXISTS verification_logs (
     CHECK(verification_result IN ('granted', 'denied'))
 );
 
+-- Retained indefinitely so delayed serial/LoRa retries cannot repeat a transition.
+-- Reuse of a key with a different payload is rejected by the CMS1 listener.
+CREATE TABLE IF NOT EXISTS verification_request_receipts (
+    gate_id         TEXT NOT NULL REFERENCES gates(gate_id) ON DELETE RESTRICT,
+    boot_id         INTEGER NOT NULL CHECK(boot_id BETWEEN 0 AND 4294967295),
+    sequence_number INTEGER NOT NULL CHECK(sequence_number BETWEEN 0 AND 65535),
+    request_payload TEXT NOT NULL,
+    response_json   TEXT NOT NULL,
+    created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (gate_id, boot_id, sequence_number)
+);
+
 CREATE TABLE IF NOT EXISTS entry_exit (
     record_id        INTEGER PRIMARY KEY AUTOINCREMENT,
     vehicle_id       INTEGER NOT NULL REFERENCES vehicles(vehicle_id) ON DELETE RESTRICT,

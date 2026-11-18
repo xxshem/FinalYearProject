@@ -1,0 +1,40 @@
+{
+  "manifest_version": 1,
+  "release_status": "candidate-uncommitted",
+  "source_branch": "ack-stabilization-20261107",
+  "base_commit": "730b52e42434acb7fd5158c6899c3cee855f376d",
+  "source_commit": null,
+  "worktree_clean": false,
+  "platformio_core": "6.2.0",
+  "build_tools": {
+    "scons": "4.41101.0",
+    "esptool_python_requirements": "platformio-build-requirements.txt"
+  },
+  "firmware": {
+    "espressif32": {
+      "platform": "7.1.3",
+      "framework": "4.20017.260907+sha.dcc1105b",
+      "compiler": "xtensa-esp32 8.4.0+2021r2-patch5",
+      "libraries": {
+        "LoRa": "0.8.0",
+        "Arduino_JSON": "0.2.2",
+        "ESP32QRCodeReader": "1.1.0"
+      }
+    },
+    "espressif8266": {
+      "platform": "4.2.1",
+      "framework": "3.30102.0",
+      "compiler": "xtensa 2.100300.220621",
+      "libraries": {
+        "LoRa": "0.8.0",
+        "LiquidCrystal_I2C": "1.1.4"
+      }
+    }
+  },
+  "python": {
+    "validation_interpreter": "3.14.7",
+    "requirements_file": "cms1-deploy-kit/requirements.txt",
+    "deployment_minimum": "3.11"
+  },
+  "build_validation": "passed: six clean-cache firmware targets; no hardware upload"
+}

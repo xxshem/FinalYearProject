@@ -4,6 +4,11 @@ import sqlite3
 import sys
 
 try:
+    from .sync_limits import MAX_SYNC_RECORD_BYTES
+except ImportError:
+    from sync_limits import MAX_SYNC_RECORD_BYTES
+
+try:
     from vvs.scripts.config import DB_PATH
 except ImportError:
     from config import DB_PATH
@@ -47,33 +52,93 @@ def init_sync_tracking(db_path=DB):
                 table_name TEXT NOT NULL,
                 row_key TEXT NOT NULL,
                 message TEXT NOT NULL,
+                serialized_bytes INTEGER,
+                record_json TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 resolved_at TEXT,
                 PRIMARY KEY (table_name, row_key)
             )
         """)
+        error_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(sync_errors)")
+        }
+        for column, declaration in (
+                ("serialized_bytes", "INTEGER"),
+                ("record_json", "TEXT")):
+            if column not in error_columns:
+                conn.execute(
+                    f"ALTER TABLE sync_errors ADD COLUMN {column} {declaration}")
+
+        def record_json_sql(table, row_alias):
+            columns = [row[1] for row in conn.execute(
+                f'PRAGMA table_info("{table}")')]
+            fields = ", ".join(
+                f"'{column.replace(chr(39), chr(39) * 2)}', "
+                f'{row_alias}."{column.replace(chr(34), chr(34) * 2)}"'
+                for column in columns)
+            return f"json_object({fields})"
+
         for table, primary_key in SYNC_TABLES.items():
+            record_json_new = record_json_sql(table, "NEW")
+            record_json_table = record_json_sql(table, table)
+            record_size_new = f"length(CAST({record_json_new} AS BLOB))"
+            record_size_table = f"length(CAST({record_json_table} AS BLOB))"
+            for operation in ("insert", "update", "delete"):
+                conn.execute(
+                    f'DROP TRIGGER IF EXISTS "sync_{table}_{operation}"')
             conn.execute(f"""
-                CREATE TRIGGER IF NOT EXISTS "sync_{table}_insert"
+                CREATE TRIGGER "sync_{table}_insert"
                 AFTER INSERT ON "{table}"
                 BEGIN
+                    INSERT INTO sync_errors
+                        (table_name, row_key, message, serialized_bytes,
+                         record_json, created_at, resolved_at)
+                    SELECT '{table}', CAST(NEW."{primary_key}" AS TEXT),
+                           'serialized record exceeds {MAX_SYNC_RECORD_BYTES} bytes ('
+                               || {record_size_new} || ' bytes)',
+                           {record_size_new}, {record_json_new},
+                           CURRENT_TIMESTAMP, NULL
+                    WHERE {record_size_new} > {MAX_SYNC_RECORD_BYTES}
+                    ON CONFLICT(table_name, row_key) DO UPDATE SET
+                        message=excluded.message,
+                        serialized_bytes=excluded.serialized_bytes,
+                        record_json=excluded.record_json,
+                        created_at=CURRENT_TIMESTAMP,
+                        resolved_at=NULL;
                     INSERT INTO sync_change_log (table_name, row_key, operation)
-                    VALUES ('{table}', CAST(NEW."{primary_key}" AS TEXT), 'upsert');
+                    SELECT '{table}', CAST(NEW."{primary_key}" AS TEXT), 'upsert'
+                    WHERE {record_size_new} <= {MAX_SYNC_RECORD_BYTES};
                 END
             """)
             conn.execute(f"""
-                CREATE TRIGGER IF NOT EXISTS "sync_{table}_update"
+                CREATE TRIGGER "sync_{table}_update"
                 AFTER UPDATE ON "{table}"
                 BEGIN
                     INSERT INTO sync_change_log (table_name, row_key, operation)
                     SELECT '{table}', CAST(OLD."{primary_key}" AS TEXT), 'delete'
                     WHERE OLD."{primary_key}" IS NOT NEW."{primary_key}";
+                    INSERT INTO sync_errors
+                        (table_name, row_key, message, serialized_bytes,
+                         record_json, created_at, resolved_at)
+                    SELECT '{table}', CAST(NEW."{primary_key}" AS TEXT),
+                           'serialized record exceeds {MAX_SYNC_RECORD_BYTES} bytes ('
+                               || {record_size_new} || ' bytes)',
+                           {record_size_new}, {record_json_new},
+                           CURRENT_TIMESTAMP, NULL
+                    WHERE {record_size_new} > {MAX_SYNC_RECORD_BYTES}
+                    ON CONFLICT(table_name, row_key) DO UPDATE SET
+                        message=excluded.message,
+                        serialized_bytes=excluded.serialized_bytes,
+                        record_json=excluded.record_json,
+                        created_at=CURRENT_TIMESTAMP,
+                        resolved_at=NULL;
                     INSERT INTO sync_change_log (table_name, row_key, operation)
-                    VALUES ('{table}', CAST(NEW."{primary_key}" AS TEXT), 'upsert');
+                    SELECT '{table}', CAST(NEW."{primary_key}" AS TEXT), 'upsert'
+                    WHERE {record_size_new} <= {MAX_SYNC_RECORD_BYTES};
                 END
             """)
             conn.execute(f"""
-                CREATE TRIGGER IF NOT EXISTS "sync_{table}_delete"
+                CREATE TRIGGER "sync_{table}_delete"
                 AFTER DELETE ON "{table}"
                 BEGIN
                     INSERT INTO sync_change_log (table_name, row_key, operation)
@@ -90,10 +155,31 @@ def init_sync_tracking(db_path=DB):
         ).fetchone()
         if bootstrapped is None:
             for table, primary_key in SYNC_TABLES.items():
+                record_json_table = record_json_sql(table, table)
+                record_size_table = f"length(CAST({record_json_table} AS BLOB))"
+                conn.execute(f"""
+                    INSERT INTO sync_errors
+                        (table_name, row_key, message, serialized_bytes,
+                         record_json, created_at, resolved_at)
+                    SELECT '{table}', CAST("{primary_key}" AS TEXT),
+                           'serialized record exceeds {MAX_SYNC_RECORD_BYTES} bytes ('
+                               || {record_size_table} || ' bytes)',
+                           {record_size_table}, {record_json_table},
+                           CURRENT_TIMESTAMP, NULL
+                    FROM "{table}"
+                    WHERE {record_size_table} > {MAX_SYNC_RECORD_BYTES}
+                    ON CONFLICT(table_name, row_key) DO UPDATE SET
+                        message=excluded.message,
+                        serialized_bytes=excluded.serialized_bytes,
+                        record_json=excluded.record_json,
+                        created_at=CURRENT_TIMESTAMP,
+                        resolved_at=NULL
+                """)
                 conn.execute(f"""
                     INSERT INTO sync_change_log (table_name, row_key, operation)
                     SELECT ?, CAST("{primary_key}" AS TEXT), 'upsert'
                     FROM "{table}"
+                    WHERE {record_size_table} <= {MAX_SYNC_RECORD_BYTES}
                     ORDER BY "{primary_key}"
                 """, (table,))
             conn.execute("""

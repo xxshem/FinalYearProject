@@ -3,8 +3,10 @@
 ## Role
 Single-radio modem. Prioritizes gate traffic on CH1 (433.1 MHz) and performs
 bounded, asynchronous sync transmissions on CH2 (433.5 MHz). Both channels use
-SF7, 125 kHz bandwidth, coding rate 4/5, CRC, and 2 dBm transmit power. The
-CMS1 listener process exclusively owns USB serial.
+SF7, 125 kHz bandwidth, coding rate 4/5, an 8-symbol preamble, CRC, normal IQ,
+and 2 dBm transmit power. SPI runs at 4 MHz. The CMS1 listener process
+exclusively owns USB serial. The source profile and physical-device limitation
+are recorded in [`RADIO_CONFIGURATION.md`](../RADIO_CONFIGURATION.md).
 
 ## Pins
 | SX1278 | ESP32 Dev |
@@ -19,6 +21,9 @@ CMS1 listener process exclusively owns USB serial.
 | DIO0   | GPIO 2  |
 
 ## Build / Upload
+The tested PlatformIO versions and clean-build commands are recorded in
+[`BUILD_ENVIRONMENT.md`](../BUILD_ENVIRONMENT.md).
+
     pio run
     pio run --target upload
 
@@ -50,8 +55,7 @@ Thus, a request lost during CH2 may be delayed until the bridge timeout.
 
 TX completion is detected by the LoRa TX-done interrupt with a 1500 ms
 fallback timeout, radio reinitialization, and at most one retransmission per
-command. Repeated failures are reported over USB. The host airtime estimate
-uses the configured SF7/CRC-enabled radio profile.
+command. Repeated failures are reported over USB. The host airtime estimate uses the configured SF7/CRC-enabled radio profile.
 
 For hardware acceptance, record a fixed set of scans with sync disabled and
 the same number during maximum-size sync batches. A gate-side test harness

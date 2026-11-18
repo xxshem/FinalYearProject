@@ -23,6 +23,7 @@
 
 #define FREQ_CH1   433.1E6
 #define FREQ_CH2   433.5E6
+#define RADIO_SPI_HZ 4E6
 #define SYNC_ACK_TIMEOUT_MS 1000
 #define RADIO_TX_TIMEOUT_MS 1500
 #define RADIO_RECOVERY_RETRIES 2
@@ -30,6 +31,10 @@
 #define RADIO_RECOVERY_RETRY_INTERVAL_MS 5000UL
 #define RADIO_TX_ATTEMPTS 2
 #define SERIAL_LINE_MAX 512
+#define LORA_MAX_PAYLOAD_BYTES 255
+#define SX127X_REG_IRQ_FLAGS 0x12
+#define SX127X_IRQ_RX_DONE 0x40
+#define SX127X_IRQ_CRC_ERROR 0x20
 
 enum RadioState {
     CH1_GATE_LISTEN,
@@ -40,10 +45,21 @@ enum RadioState {
     RADIO_RECOVERY_PENDING
 };
 
+struct RadioCounters {
+    uint32_t rx_packets;
+    uint32_t crc_errors;
+    uint32_t rx_timeouts;
+    uint32_t tx_success;
+    uint32_t tx_failures;
+    uint32_t tx_timeouts;
+};
+
 RadioState radioState = CH1_GATE_LISTEN;
 int currentCh = 1;
 bool radioReady = false;
 volatile bool radioTxComplete = false;
+RadioCounters channelCounters[2] = {};
+bool countersSaturated = false;
 String serialLine;
 String pendingCommand;
 String queuedCommand;
@@ -59,6 +75,63 @@ unsigned long ackDeadline = 0;
 unsigned long recoveryNextAt = 0;
 
 void scheduleBackgroundRecovery();
+
+void incrementCounter(uint32_t& counter) {
+    if (counter == UINT32_MAX) {
+        countersSaturated = true;
+        return;
+    }
+    ++counter;
+}
+
+uint8_t readRadioIrqFlags() {
+    SPI.beginTransaction(SPISettings(RADIO_SPI_HZ, MSBFIRST, SPI_MODE0));
+    digitalWrite(LORA_SS, LOW);
+    SPI.transfer(SX127X_REG_IRQ_FLAGS);
+    const uint8_t flags = SPI.transfer(0);
+    digitalWrite(LORA_SS, HIGH);
+    SPI.endTransaction();
+    return flags;
+}
+
+int parseRadioPacket(int channel) {
+    const uint8_t flags = readRadioIrqFlags();
+    const int packetSize = LoRa.parsePacket();
+    RadioCounters& counters = channelCounters[channel - 1];
+    if ((flags & (SX127X_IRQ_RX_DONE | SX127X_IRQ_CRC_ERROR)) ==
+        (SX127X_IRQ_RX_DONE | SX127X_IRQ_CRC_ERROR)) {
+        incrementCounter(counters.crc_errors);
+    } else if (packetSize > 0) {
+        incrementCounter(counters.rx_packets);
+    }
+    return packetSize;
+}
+
+void printCounterObject(const RadioCounters& counters) {
+    Serial.print("{\"rx_packets\":");
+    Serial.print(counters.rx_packets);
+    Serial.print(",\"crc_errors\":");
+    Serial.print(counters.crc_errors);
+    Serial.print(",\"rx_timeouts\":");
+    Serial.print(counters.rx_timeouts);
+    Serial.print(",\"tx_success\":");
+    Serial.print(counters.tx_success);
+    Serial.print(",\"tx_failures\":");
+    Serial.print(counters.tx_failures);
+    Serial.print(",\"tx_timeouts\":");
+    Serial.print(counters.tx_timeouts);
+    Serial.print('}');
+}
+
+void reportRadioStats() {
+    Serial.print("STATS:{\"type\":\"RADIO_STATS\",\"reset\":\"boot\",\"saturated\":");
+    Serial.print(countersSaturated ? "true" : "false");
+    Serial.print(",\"ch1\":");
+    printCounterObject(channelCounters[0]);
+    Serial.print(",\"ch2\":");
+    printCounterObject(channelCounters[1]);
+    Serial.println('}');
+}
 
 bool jsonStringField(const String& json, const char* key, String& value) {
     const String field = "\"" + String(key) + "\"";
@@ -117,6 +190,7 @@ bool initializeRadio(int channel) {
     radioReady = false;
     radioTxComplete = false;
     LoRa.setPins(LORA_SS, LORA_RST, LORA_DIO0);
+    LoRa.setSPIFrequency(RADIO_SPI_HZ);
     if (!LoRa.begin(channel == 1 ? FREQ_CH1 : FREQ_CH2)) return false;
     configureRadio();
     LoRa.onTxDone(handleRadioTxDone);
@@ -176,13 +250,19 @@ void scheduleBackgroundRecovery() {
 }
 
 void startTransmitAttempt() {
-    if (!radioReady || !LoRa.beginPacket()) {
+    if (!radioReady) {
+        startRadioRecovery();
+        return;
+    }
+    if (!LoRa.beginPacket()) {
+        incrementCounter(channelCounters[txChannel - 1].tx_failures);
         startRadioRecovery();
         return;
     }
     LoRa.print(txPayload);
     radioTxComplete = false;
     if (!LoRa.endPacket(true)) {
+        incrementCounter(channelCounters[txChannel - 1].tx_failures);
         startRadioRecovery();
         return;
     }
@@ -248,11 +328,14 @@ void recoverRadio() {
 void serviceTransmit() {
     if (!radioTxComplete) {
         if (millis() - txStartedAt >= RADIO_TX_TIMEOUT_MS) {
+            incrementCounter(channelCounters[txChannel - 1].tx_timeouts);
+            incrementCounter(channelCounters[txChannel - 1].tx_failures);
             Serial.println("[GW1] RADIO_TX_TIMEOUT; recovering radio");
             startRadioRecovery();
         }
         return;
     }
+    incrementCounter(channelCounters[txChannel - 1].tx_success);
     if (txWaitForAck) {
         ackDeadline = millis() + SYNC_ACK_TIMEOUT_MS;
         radioState = CH2_ACK_WAIT;
@@ -273,7 +356,7 @@ void finishAckWait() {
 }
 
 void serviceAckWait() {
-    const int packetSize = LoRa.parsePacket();
+    const int packetSize = parseRadioPacket(2);
     if (packetSize > 0) {
         String response;
         while (LoRa.available()) response += static_cast<char>(LoRa.read());
@@ -287,6 +370,7 @@ void serviceAckWait() {
         }
     }
     if (static_cast<long>(millis() - ackDeadline) >= 0) {
+        incrementCounter(channelCounters[1].rx_timeouts);
         reportSyncTimeout(txTransferId);
         finishAckWait();
     }
@@ -310,6 +394,13 @@ void startCommand(const String& command) {
         return;
     }
     if (line.length() == 0) return;
+    if (line.length() > LORA_MAX_PAYLOAD_BYTES) {
+        Serial.print("[GW1] LORA_PACKET_TOO_LARGE channel=");
+        Serial.print(channel);
+        Serial.print(" bytes=");
+        Serial.println(line.length());
+        return;
+    }
 
     String transferId;
     if (waitForReply) {
@@ -350,7 +441,7 @@ void serviceSerialInput() {
 }
 
 void serviceGateReceive() {
-    const int packetSize = LoRa.parsePacket();
+    const int packetSize = parseRadioPacket(1);
     if (packetSize <= 0) return;
     String out = "C1:" + String(LoRa.packetRssi()) + "," +
                  String(LoRa.packetSnr(), 1) + ":";
@@ -414,7 +505,10 @@ void loop() {
         pendingCommand = queuedCommand;
         queuedCommand = "";
     }
-    if ((radioState == CH1_GATE_LISTEN || radioState == CH1_GATE_SERVICE)
+    if (pendingCommand == "STATS?") {
+        pendingCommand = "";
+        reportRadioStats();
+    } else if ((radioState == CH1_GATE_LISTEN || radioState == CH1_GATE_SERVICE)
         && pendingCommand.length() > 0 && txPayload.length() == 0) {
         const String command = pendingCommand;
         pendingCommand = "";
