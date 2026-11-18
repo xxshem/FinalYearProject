@@ -19,7 +19,7 @@
 // ── Pin map (ESP32 Dev Board) ────────────────────────
 #define LORA_SS    5
 #define LORA_RST   14
-#define LORA_DIO0  2
+#define LORA_DIO0  4
 
 #define FREQ_CH1   433.1E6
 #define FREQ_CH2   433.5E6
