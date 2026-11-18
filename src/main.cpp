@@ -13,11 +13,11 @@
 #include <Arduino_JSON.h>
 #include "qr_decoder.h"
 #include "lora_packet_limits.h"
+#include "../arduino/gate_node/gate_config.h"
 
-// ── Configuration ─────────────────────────────────────
-String GATE_ID = "GATE_A";
 #define DEVICE_ID 0x01
 uint32_t bootId = 0;
+bool rotateBootIdBeforeNextRequest = false;
 
 // UART0 carries the ESP-12E protocol and is also used for firmware upload.
 #define BRIDGE_UART_RX  3
@@ -77,6 +77,14 @@ void setup() {
 }
 
 void loop() {
+    if (rotateBootIdBeforeNextRequest) {
+        const uint32_t previousBootId = bootId;
+        bootId = esp_random();
+        if (bootId == previousBootId) ++bootId;
+        seq = 0;
+        rotateBootIdBeforeNextRequest = false;
+    }
+
     String payload = qr_scan_once();
 
     if (payload.length() == 0) { delay(50); return; }
@@ -88,6 +96,7 @@ void loop() {
     sendStatus("CHECKING", token);
 
     const uint16_t requestSeq = seq++;
+    if (requestSeq == UINT16_MAX) rotateBootIdBeforeNextRequest = true;
     while (RadioBridge.available()) RadioBridge.read();
 
     String reply;

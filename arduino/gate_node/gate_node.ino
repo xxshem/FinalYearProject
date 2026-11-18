@@ -8,13 +8,13 @@
 #include <Arduino.h>
 #include <Arduino_JSON.h>
 #include <ESP32QRCodeReader.h>
+#include "gate_config.h"
 
-// ── Configuration ─────────────────────────────────────
-String GATE_ID = "GATE_A";
 constexpr size_t LORA_MAX_PACKET_BYTES = 255;
 
 uint32_t bootId = 0;
 uint16_t seq = 0;
+bool rotateBootIdBeforeNextRequest = false;
 
 // UART0 carries the ESP-12E protocol and is also used for firmware upload.
 constexpr int BRIDGE_UART_RX = 3;
@@ -78,6 +78,14 @@ void setup() {
 }
 
 void loop() {
+    if (rotateBootIdBeforeNextRequest) {
+        const uint32_t previousBootId = bootId;
+        bootId = esp_random();
+        if (bootId == previousBootId) ++bootId;
+        seq = 0;
+        rotateBootIdBeforeNextRequest = false;
+    }
+
     const String payload = qrScanOnce();
 
     if (payload.length() == 0) {
@@ -94,6 +102,7 @@ void loop() {
     sendStatus("CHECKING", token);
 
     const uint16_t requestSeq = seq++;
+    if (requestSeq == UINT16_MAX) rotateBootIdBeforeNextRequest = true;
     while (RadioBridge.available()) RadioBridge.read();
 
     String reply;

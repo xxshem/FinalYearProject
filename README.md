@@ -30,9 +30,10 @@ expander, LEDs, or buzzer. This keeps those peripherals away from the camera
 and its pin assignments.
 
 The ESP-12E bridge in `esp8266_lora_bridge/` owns the SX1278 radio. It operates
-on CH1 at 433.1 MHz with SF12, 125 kHz bandwidth, coding rate 4/5, and 20 dBm
-transmit power. The ESP32-CAM in this project communicates with that bridge
-over UART and does not configure the radio.
+on CH1 at 433.1 MHz with SF7, 125 kHz bandwidth, coding rate 4/5, an 8-symbol
+preamble, CRC enabled, normal IQ, 2 dBm transmit power, and 4 MHz SPI. The
+ESP32-CAM in this project communicates with that bridge over UART and does not
+configure the radio. See the [authoritative radio configuration](../RADIO_CONFIGURATION.md).
 
 ## UART protocol
 
@@ -55,6 +56,9 @@ same identifiers. Request-specific errors use
 return its cached decision instead of processing the scan twice.
 The ESP32-CAM ROM may emit boot text on UART0 at its bootloader baud; that
 startup noise is not application data and is discarded before a scan request.
+CMS1 serializes each complete verification response as UTF-8 and caps it at
+255 bytes. If it would exceed the limit, CMS1 sends a compact correlated
+denial response; the gate treats it as rejected and does not grant access.
 
 The ESP32-CAM also sends these local display/feedback events to the NodeMCU:
 
@@ -78,20 +82,44 @@ to initialize, allowing its LCD to report camera and gate state.
 
 ## Build and upload
 
+The tested PlatformIO versions and clean-build commands are recorded in
+[`BUILD_ENVIRONMENT.md`](../BUILD_ENVIRONMENT.md).
+
 From this directory, with the ESP32-CAM UART link disconnected:
 
 ```text
-pio run
-pio run --target upload
+pio run -e esp32cam
+pio run -e esp32cam --target upload
 ```
 
 UART0 is shared by flashing and the 9600-baud bridge protocol. The gate does
 not send diagnostic text or accept serial commands on this port, so it cannot
 be used as a USB console while the bridge is connected. Verification starts
-from the camera QR scanner. The standalone sketch uses the same UART0 application
-link and has the same console limitation.
-The gate ID is set in firmware (`GATE_ID`) and requires a rebuild/reflash to
-change.
+from the camera QR scanner. The standalone sketch uses the same UART0
+application link and has the same console limitation.
+
+The firmware gate ID is a build-time value in `gate_config.h`. It must match
+`GATE_[A-Z]`; CMS1 must also have that gate registered in its `gates` table.
+The build checks the ID at compile time. The PlatformIO environments provide
+separate builds for the deployed gates:
+
+| Gate ID | Build environment | Build | Flash |
+|---|---|---|---|
+| `GATE_A` | `esp32cam` | `pio run -e esp32cam` | `pio run -e esp32cam -t upload` |
+| `GATE_B` | `gate_b` | `pio run -e gate_b` | `pio run -e gate_b -t upload` |
+| `GATE_C` | `gate_c` | `pio run -e gate_c` | `pio run -e gate_c -t upload` |
+
+Build and flash the matching environment for each physical gate. To use
+another letter, change that environment's `GATE_ID_VALUE` in
+`platformio.ini`, ensure CMS1 has the matching gate row, and rebuild. The ID
+is compiled into the firmware, used in each `VERIFY_REQ` body's `gate` field,
+and therefore remains unchanged across ordinary reboots. There is no supported
+runtime reassignment command.
+
+To confirm a flashed ID, reconnect the bridge, scan a registered QR code, and
+check the CMS1 listener output or `verification_logs.gate_id` for that scan.
+For example, separate `esp32cam` and `gate_c` builds must be observed at CMS1
+as `GATE_A` and `GATE_C`, respectively.
 
 ## Arduino IDE
 
@@ -100,7 +128,9 @@ A standalone Arduino IDE sketch is in
 the PlatformIO `main.cpp` and QR decoder implementation and inlines the
 255-byte LoRa packet limit, so it does not need the project `include/` or
 `src/` folders. It retains the QR verification, UART bridge protocol, and
-status messages.
+status messages. It uses `arduino/gate_node/gate_config.h`; change its
+`GATE_ID_VALUE` default before compiling with Arduino IDE. The compile-time
+format check applies to both build methods.
 
 ### Install the ESP32 board package and libraries
 
