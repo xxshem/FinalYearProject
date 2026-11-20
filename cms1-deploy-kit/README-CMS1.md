@@ -148,6 +148,14 @@ skipped data remains visible in `sync_errors` and is not silently discarded.
 CMS2 independently rejects oversized records and batches before applying any
 database changes.
 
+The CMS1 modem services queued gate-response (`C1`) commands ahead of sync
+(`C2`) commands and dwells on CH1 for at least 500 ms between CH2 frames. A
+single radio still cannot receive CH1 during a CH2 transmission. If a sync
+transfer exhausts its initial attempt and three retries without an ACK, the
+publisher backs off for 30 seconds, 1 minute, 2 minutes, then 5 minutes on
+successive failed transfers (capped at 5 minutes). A positive ACK resets the
+backoff; the durable cursor remains unchanged until then.
+
 To recover, inspect unresolved items with:
 
     sqlite3 ~/vvs/database/vvs.db "SELECT table_name, row_key, serialized_bytes, message FROM sync_errors WHERE resolved_at IS NULL;"

@@ -18,6 +18,7 @@ from scripts.sync_limits import (
     CHUNK_BYTES, MAX_BATCH_BYTES, MAX_CHUNKS, MAX_SYNC_RECORD_BYTES)
 
 INTERVAL_SEC = 30
+TRANSFER_FAILURE_BACKOFF_SECONDS = (30, 60, 120, 300)
 MAX_BATCH_EVENTS = 256
 MAX_LORA_PAYLOAD_BYTES = 255
 BAUD = 115200
@@ -29,7 +30,7 @@ CRC_ENABLED = True
 IMPLICIT_HEADER = False
 FIRMWARE_ACK_WINDOW_SEC = 1
 SERIAL_REPLY_MARGIN_SEC = 0.75
-FRAME_GUARD_SEC = 0.25
+FRAME_GUARD_SEC = 0.5
 TABLES = {
     "vehicles": "updated_at",
     "gates": "updated_at",
@@ -93,6 +94,7 @@ class SyncPublisher:
         self.awaiting_ack = False
         self.ack_deadline = 0.0
         self.retries = 0
+        self.consecutive_failures = 0
         self._reported_quarantines = set()
 
     def _read_checkpoint(self):
@@ -307,8 +309,14 @@ class SyncPublisher:
             if now < self.ack_deadline:
                 return
             if self.retries >= 3:
-                print(f"[SYNC-TX] transfer {self.transfer_id} not acknowledged")
-                self._clear_transfer(now)
+                backoff_index = min(
+                    self.consecutive_failures,
+                    len(TRANSFER_FAILURE_BACKOFF_SECONDS) - 1)
+                backoff = TRANSFER_FAILURE_BACKOFF_SECONDS[backoff_index]
+                self.consecutive_failures += 1
+                print(f"[SYNC-TX] transfer {self.transfer_id} not acknowledged; "
+                      f"pausing CH2 for {backoff}s")
+                self._clear_transfer(now, backoff)
                 return
             self.retries += 1
             self.frame_index = 0
@@ -374,6 +382,7 @@ class SyncPublisher:
         if ack_result == "positive":
             self._persist_checkpoint(self.candidate_seq, self.candidate_keys)
             self.watermark = self.candidate_seq
+            self.consecutive_failures = 0
             print(f"[SYNC-TX] acknowledged {self.transfer_id}")
         elif ack_result == "negative":
             print(f"[SYNC-TX] receiver rejected {self.transfer_id}: {message.get('error', '')}")
@@ -386,14 +395,14 @@ class SyncPublisher:
         self._clear_transfer(time.monotonic())
         return True
 
-    def _clear_transfer(self, now):
+    def _clear_transfer(self, now, next_poll_delay=INTERVAL_SEC):
         self.frames = []
         self.frame_index = 0
         self.transfer_id = None
         self.candidate_seq = None
         self.candidate_keys = []
         self.awaiting_ack = False
-        self.next_poll = now + INTERVAL_SEC
+        self.next_poll = now + next_poll_delay
 
     def _persist_checkpoint(self, candidate_seq, candidate_keys):
         if type(candidate_seq) is not int:

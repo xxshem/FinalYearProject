@@ -18,7 +18,7 @@ are recorded in [`RADIO_CONFIGURATION.md`](../RADIO_CONFIGURATION.md).
 | MOSI   | GPIO 23 |
 | NSS    | GPIO 5  |
 | RESET  | GPIO 14 |
-| DIO0   | GPIO 2  |
+| DIO0   | GPIO 4  |
 
 ## Build / Upload
 The tested PlatformIO versions and clean-build commands are recorded in
@@ -38,18 +38,24 @@ Host -> modem : "C1:<payload>\n", "C2:<payload>\n", or "C2W:<payload>\n"
 Modem -> host : "C1:<rssi>,<snr>:<payload>\n" or "C2:<payload>\n"
 
 The firmware uses explicit `CH1_GATE_LISTEN`, `CH2_SYNC_TX`,
-`CH2_ACK_WAIT`, `CH1_GATE_SERVICE`, and `RADIO_RECOVERY` states. Each sync
-frame is transmitted asynchronously, then the radio returns to CH1; only
-`C2W` (`SYNC_END`) opens a bounded 1000 ms CH2 ACK window. The ACK must match
-the active transfer ID. Missing, stale, or mismatched ACKs do not advance the
-CMS1 durable cursor; the publisher retries the same transfer identity and CMS2
+`CH2_ACK_WAIT`, `CH1_GATE_SERVICE`, and `RADIO_RECOVERY` states. Each ordinary
+CH2 sync frame is transmitted asynchronously, then the radio returns to CH1
+for at least 500 ms before another sync frame can start. C1 response commands
+are queued as urgent work and take precedence over queued C2 commands at frame
+boundaries. `C2W` (`SYNC_END`) opens a bounded 1000 ms CH2 ACK window; a pending
+C1 response ends that wait early. In either case, the radio then returns to
+CH1 and dwells before another sync frame can start. The ACK must match the
+active transfer ID. Missing, stale, or mismatched ACKs do not advance the CMS1
+durable cursor; the publisher retries the same transfer identity and CMS2
 reconciles the replay transactionally.
 
 A single radio cannot hear CH1 while transmitting or tuned to CH2. A gate
-request arriving during a sync transmission or ACK window can be missed; the
-gate bridge's request retry is the recovery mechanism. The gate retries the
-same boot/sequence identity up to three times when the bridge reports a radio
-timeout; the bridge's receive window is 6000 ms and CMS1's request cache
+request arriving during a sync transmission or the CH2 ACK window can still be
+missed; the gate bridge's request retry is the recovery mechanism. The 500 ms
+CH1 dwell bounds the interval between sync frames but cannot interrupt a frame
+already on air or guarantee zero packet loss with one radio. The gate retries
+the same boot/sequence identity up to three times when the bridge reports a
+radio timeout; the bridge's receive window is 6000 ms and CMS1's request cache
 prevents a successfully repeated request from applying the gate action twice.
 Thus, a request lost during CH2 may be delayed until the bridge timeout.
 

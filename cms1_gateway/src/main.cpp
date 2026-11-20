@@ -25,6 +25,7 @@
 #define FREQ_CH2   433.5E6
 #define RADIO_SPI_HZ 4E6
 #define SYNC_ACK_TIMEOUT_MS 1000
+#define CH1_PRIORITY_DWELL_MS 500UL
 #define RADIO_TX_TIMEOUT_MS 1500
 #define RADIO_RECOVERY_RETRIES 2
 #define RADIO_RECOVERY_RETRY_DELAY_MS 100
@@ -61,9 +62,13 @@ volatile bool radioTxComplete = false;
 RadioCounters channelCounters[2] = {};
 bool countersSaturated = false;
 String serialLine;
+String urgentCommand;
+String queuedUrgentCommand;
 String pendingCommand;
 String queuedCommand;
 bool serialLineTooLong = false;
+bool ch1PriorityDwellActive = false;
+unsigned long ch1PriorityDwellDeadline = 0;
 String txPayload;
 String txTransferId;
 int txChannel = 1;
@@ -212,7 +217,27 @@ void switchTo(int ch) {
     applyChannel(ch);
 }
 
+bool hasUrgentCommand() {
+    return urgentCommand.length() > 0 || queuedUrgentCommand.length() > 0;
+}
+
+void startCh1PriorityDwell() {
+    if (!radioReady) return;
+    switchTo(1);
+    radioState = CH1_GATE_LISTEN;
+    ch1PriorityDwellActive = true;
+    ch1PriorityDwellDeadline = millis() + CH1_PRIORITY_DWELL_MS;
+}
+
+void serviceCh1PriorityDwell() {
+    if (ch1PriorityDwellActive &&
+        static_cast<long>(millis() - ch1PriorityDwellDeadline) >= 0) {
+        ch1PriorityDwellActive = false;
+    }
+}
+
 void finishTransmitFailure() {
+    const int failedChannel = txChannel;
     Serial.print("[GW1] RADIO_TX_FAILURE channel=");
     Serial.print(txChannel);
     Serial.print(" attempts=");
@@ -223,8 +248,11 @@ void finishTransmitFailure() {
     txPayload = "";
     txTransferId = "";
     txWaitForAck = false;
+    ch1PriorityDwellActive = false;
     if (!radioReady) {
         scheduleBackgroundRecovery();
+    } else if (failedChannel == 2) {
+        startCh1PriorityDwell();
     }
 }
 
@@ -335,24 +363,28 @@ void serviceTransmit() {
         }
         return;
     }
+    const int completedChannel = txChannel;
     incrementCounter(channelCounters[txChannel - 1].tx_success);
     if (txWaitForAck) {
         ackDeadline = millis() + SYNC_ACK_TIMEOUT_MS;
         radioState = CH2_ACK_WAIT;
     } else {
-        radioState = CH1_GATE_LISTEN;
-        switchTo(1);
         txPayload = "";
         txTransferId = "";
+        if (completedChannel == 2) {
+            startCh1PriorityDwell();
+        } else {
+            radioState = CH1_GATE_LISTEN;
+            switchTo(1);
+        }
     }
 }
 
 void finishAckWait() {
-    radioState = CH1_GATE_LISTEN;
-    switchTo(1);
     txPayload = "";
     txTransferId = "";
     txWaitForAck = false;
+    startCh1PriorityDwell();
 }
 
 void serviceAckWait() {
@@ -368,6 +400,11 @@ void serviceAckWait() {
             finishAckWait();
             return;
         }
+    }
+    if (hasUrgentCommand()) {
+        reportSyncTimeout(txTransferId);
+        finishAckWait();
+        return;
     }
     if (static_cast<long>(millis() - ackDeadline) >= 0) {
         incrementCounter(channelCounters[1].rx_timeouts);
@@ -418,6 +455,27 @@ void startCommand(const String& command) {
     beginTransmit(line, channel, waitForReply, transferId);
 }
 
+void queueSerialCommand(const String& command) {
+    if (command.startsWith("C1:")) {
+        if (urgentCommand.length() == 0) {
+            urgentCommand = command;
+        } else if (queuedUrgentCommand.length() == 0) {
+            queuedUrgentCommand = command;
+        } else {
+            Serial.println("[GW1] URGENT_COMMAND_QUEUE_FULL");
+        }
+        return;
+    }
+
+    if (pendingCommand.length() == 0) {
+        pendingCommand = command;
+    } else if (queuedCommand.length() == 0) {
+        queuedCommand = command;
+    } else {
+        Serial.println("[GW1] SERIAL_COMMAND_QUEUE_FULL");
+    }
+}
+
 void serviceSerialInput() {
     while (Serial.available()) {
         const char c = static_cast<char>(Serial.read());
@@ -426,9 +484,7 @@ void serviceSerialInput() {
             if (serialLineTooLong) {
                 Serial.println("[GW1] SERIAL_FRAME_TOO_LONG");
             } else if (serialLine.length() > 0) {
-                if (pendingCommand.length() == 0) pendingCommand = serialLine;
-                else if (queuedCommand.length() == 0) queuedCommand = serialLine;
-                else Serial.println("[GW1] SERIAL_COMMAND_QUEUE_FULL");
+                queueSerialCommand(serialLine);
             }
             serialLine = "";
             serialLineTooLong = false;
@@ -501,6 +557,12 @@ void loop() {
             if (radioReady) serviceGateReceive();
             break;
     }
+    serviceCh1PriorityDwell();
+
+    if (urgentCommand.length() == 0 && queuedUrgentCommand.length() > 0) {
+        urgentCommand = queuedUrgentCommand;
+        queuedUrgentCommand = "";
+    }
     if (pendingCommand.length() == 0 && queuedCommand.length() > 0) {
         pendingCommand = queuedCommand;
         queuedCommand = "";
@@ -508,8 +570,16 @@ void loop() {
     if (pendingCommand == "STATS?") {
         pendingCommand = "";
         reportRadioStats();
+    }
+    if ((radioState == CH1_GATE_LISTEN || radioState == CH1_GATE_SERVICE)
+        && radioReady && txPayload.length() == 0 && urgentCommand.length() > 0) {
+        const String command = urgentCommand;
+        urgentCommand = queuedUrgentCommand;
+        queuedUrgentCommand = "";
+        startCommand(command);
     } else if ((radioState == CH1_GATE_LISTEN || radioState == CH1_GATE_SERVICE)
-        && pendingCommand.length() > 0 && txPayload.length() == 0) {
+        && radioReady && txPayload.length() == 0 && !ch1PriorityDwellActive
+        && pendingCommand.length() > 0) {
         const String command = pendingCommand;
         pendingCommand = "";
         startCommand(command);
